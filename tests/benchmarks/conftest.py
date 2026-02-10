@@ -3,18 +3,16 @@
 # Copyright (c) 2025 Roboflow. All Rights Reserved.
 # Licensed under the Apache License, Version 2.0 [see LICENSE for details]
 # ------------------------------------------------------------------------
-import random
 import shutil
 import zipfile
 from pathlib import Path
 from typing import Any, Generator
 from urllib.request import urlretrieve
 
-import numpy as np
 import pytest
-import torch
 
 from rfdetr.datasets.synthetic import DatasetSplitRatios, generate_coco_dataset
+from rfdetr.util.utils import seed_all
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DATA_DIR = PROJECT_ROOT / "data"
@@ -74,14 +72,12 @@ def seed_everything(request: pytest.FixtureRequest) -> None:
         def test_foo(seed_everything): ...
     """
     seed = request.param if hasattr(request, "param") else 7
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
+    seed_all(seed)
 
 
 @pytest.fixture(scope="session")
 def synthetic_shape_dataset_dir(tmp_path_factory: pytest.TempPathFactory) -> Generator[Path, Any, None]:
+    seed_all()
     dataset_dir = tmp_path_factory.mktemp("synthetic_dataset")
     generate_coco_dataset(
         output_dir=str(dataset_dir),
