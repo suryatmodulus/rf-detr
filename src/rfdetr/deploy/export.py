@@ -227,7 +227,8 @@ def main(args):
     np.random.seed(seed)
     random.seed(seed)
 
-    model, criterion, postprocessors = build_model(args)
+    result = build_model(args)
+    model = result[0] if isinstance(result, tuple) else result
     n_parameters = sum(p.numel() for p in model.parameters())
     logger.info(f"number of parameters: {n_parameters}")
     n_backbone_parameters = sum(p.numel() for p in model.backbone.parameters())
