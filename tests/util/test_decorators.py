@@ -8,7 +8,7 @@ import warnings
 
 import pytest
 
-from rfdetr.utils.decorators import _DeprecatedDict
+from rfdetr.utilities.decorators import _DeprecatedDict
 
 
 class TestDeprecatedDict:
