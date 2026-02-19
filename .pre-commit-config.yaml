@@ -34,8 +34,7 @@ repos:
     hooks:
       - id: ruff-check
         args: [--fix]
-      #- id: ruff-format
-      #  types_or: [ python, pyi, jupyter ]
+      - id: ruff-format
 
   - repo: https://github.com/executablebooks/mdformat
     rev: 1.0.0

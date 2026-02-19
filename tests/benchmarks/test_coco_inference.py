@@ -59,12 +59,8 @@ _PLUS_SKIP = pytest.mark.skipif(not _PLUS_AVAILABLE, reason="requires rfdetr_plu
         pytest.param(RFDETRSmall, 0.72, 0.70, 500, 6, id="small"),
         pytest.param(RFDETRMedium, 0.73, 0.71, 500, 4, id="medium"),
         pytest.param(RFDETRLarge, 0.74, 0.72, 500, 2, id="large"),
-        pytest.param(
-            RFDETRXLarge_PML, 0.77, 0.74, 500, 2, id="xlarge", marks=_PLUS_SKIP,
-        ),
-        pytest.param(
-            RFDETR2XLarge_PML, 0.78, 0.74, 500, 2, id="2xlarge", marks=_PLUS_SKIP,
-        ),
+        pytest.param(RFDETRXLarge_PML, 0.77, 0.74, 500, 2, id="xlarge", marks=_PLUS_SKIP),
+        pytest.param(RFDETR2XLarge_PML, 0.78, 0.74, 500, 2, id="2xlarge", marks=_PLUS_SKIP),
     ],
 )
 def test_coco_detection_inference_benchmark(
@@ -127,8 +123,13 @@ def test_coco_detection_inference_benchmark(
     rfdetr.model.model.eval()
     with torch.no_grad():
         stats, _ = evaluate(
-            rfdetr.model.model, criterion, postprocess,
-            data_loader, base_ds, torch.device(device), args=args,
+            rfdetr.model.model,
+            criterion,
+            postprocess,
+            data_loader,
+            base_ds,
+            torch.device(device),
+            args=args,
         )
 
     # Dump results JSON for debugging
@@ -237,8 +238,13 @@ def test_coco_segmentation_inference_benchmark(
     rfdetr.model.model.eval()
     with torch.no_grad():
         stats, _ = evaluate(
-            rfdetr.model.model, criterion, postprocess,
-            data_loader, base_ds, torch.device(device), args=args,
+            rfdetr.model.model,
+            criterion,
+            postprocess,
+            data_loader,
+            base_ds,
+            torch.device(device),
+            args=args,
         )
 
     # Dump results JSON for debugging
