@@ -72,6 +72,12 @@ OPEN_SOURCE_MODELS = _DeprecatedDict(
 )
 
 
+def _run_on_train_end_callbacks(callbacks: DefaultDict[str, List[Callable]]) -> None:
+    """Run registered training-end callbacks for cleanup."""
+    for callback in callbacks["on_train_end"]:
+        callback()
+
+
 class Model:
     def __init__(self, **kwargs):
         args = populate_args(**kwargs)
@@ -342,6 +348,16 @@ class Model:
                 lr_scheduler.load_state_dict(checkpoint["lr_scheduler"])
                 args.start_epoch = checkpoint["epoch"] + 1
 
+        if args.start_epoch >= args.epochs:
+            logger.info(
+                "Checkpoint epoch (%d) has already reached or exceeded the target epochs (%d). "
+                "Training is already complete.",
+                args.start_epoch - 1,
+                args.epochs,
+            )
+            _run_on_train_end_callbacks(callbacks)
+            return
+
         if args.eval:
             test_stats, coco_evaluator = evaluate(model, criterion, postprocess, data_loader_val, base_ds, device, args)
             if args.output_dir:
@@ -588,8 +604,7 @@ class Model:
             with open(output_dir / "results.json", "w") as f:
                 json.dump(results, f)
 
-        for callback in callbacks["on_train_end"]:
-            callback()
+        _run_on_train_end_callbacks(callbacks)
 
     def export(
         self,
