@@ -7,10 +7,10 @@ RF-DETR supports custom data augmentations via [Albumentations](https://albument
 Pass `aug_config` to your training call. Import one of the built-in presets:
 
 ```python
-from rfdetr import RFDETRBase
+from rfdetr import RFDETRSmall
 from rfdetr.datasets.aug_config import AUG_CONSERVATIVE, AUG_AGGRESSIVE, AUG_AERIAL, AUG_INDUSTRIAL
 
-model = RFDETRBase()
+model = RFDETRSmall()
 model.train(dataset_dir="path/to/dataset", epochs=100, aug_config=AUG_CONSERVATIVE)
 ```
 
