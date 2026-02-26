@@ -25,16 +25,23 @@ import time
 from collections import OrderedDict, namedtuple
 
 import numpy as np
-import onnxruntime as nxrun
-import pycuda.driver as cuda
 import supervision as sv
-import tensorrt as trt
 import torch
 import torchvision.transforms.functional as F
 from PIL import Image
 from pycocotools.coco import COCO
 from pycocotools.cocoeval import COCOeval
 from tqdm.auto import tqdm
+
+try:
+    import tensorrt as trt
+except ImportError:
+    trt = None
+
+try:
+    import pycuda.driver as cuda
+except ImportError:
+    cuda = None
 
 from rfdetr.util.box_ops import box_xyxy_to_cxcywh
 from rfdetr.util.logger import get_logger
@@ -386,6 +393,9 @@ class TRTInference(object):
     def __init__(
         self, engine_path="dino.engine", device="cuda:0", sync_mode: bool = False, max_batch_size=32, verbose=False
     ):
+        if not trt:
+            raise ImportError("TensorRT is not installed. Please install TensorRT to use TRTInference.")
+
         self.engine_path = engine_path
         self.device = device
         self.sync_mode = sync_mode
@@ -402,8 +412,14 @@ class TRTInference(object):
 
         self.input_names = self.get_input_names()
         self.output_names = self.get_output_names()
+        self.stream = None
 
         if not self.sync_mode:
+            if not cuda:
+                raise ImportError(
+                    "pycuda is not installed. Please install `pycuda` to use TRTInference with async mode."
+                )
+
             self.stream = cuda.Stream()
 
         # self.time_profile = TimeProfiler()
@@ -453,16 +469,6 @@ class TRTInference(object):
             if shape[0] == -1:
                 raise NotImplementedError
 
-            if False:
-                if engine.get_tensor_mode(name) == trt.TensorIOMode.INPUT:
-                    data = np.random.randn(*shape).astype(dtype)
-                    ptr = cuda.mem_alloc(data.nbytes)
-                    bindings[name] = Binding(name, dtype, shape, data, ptr)
-                else:
-                    data = cuda.pagelocked_empty(trt.volume(shape), dtype)
-                    ptr = cuda.mem_alloc(data.nbytes)
-                    bindings[name] = Binding(name, dtype, shape, data, ptr)
-
             else:
                 data = torch.from_numpy(np.empty(shape, dtype=dtype)).to(device)
                 bindings[name] = Binding(name, dtype, shape, data, data.data_ptr())
@@ -492,10 +498,15 @@ class TRTInference(object):
     def synchronize(
         self,
     ):
-        if not self.sync_mode and torch.cuda.is_available():
-            torch.cuda.synchronize()
-        elif self.sync_mode:
+        if self.sync_mode:
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            return
+
+        if self.stream is not None:
             self.stream.synchronize()
+        elif torch.cuda.is_available():
+            torch.cuda.synchronize()
 
     def speed(self, blob, n):
         self.time_profile.reset()
@@ -582,6 +593,8 @@ def main(args):
     time_profile = TimeProfiler()
 
     if args.path.endswith(".onnx"):
+        import onnxruntime as nxrun
+
         sess = nxrun.InferenceSession(args.path, providers=["CUDAExecutionProvider"])
         infer_onnx(sess, coco_evaluator, time_profile, prefix, img_list, device=f"cuda:{args.device}", repeats=repeats)
     elif args.path.endswith(".engine"):

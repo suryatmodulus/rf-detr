@@ -236,7 +236,7 @@ class AlbumentationsWrapper:
         >>> import albumentations as A
         >>> # Geometric transform - automatically transforms boxes
         >>> wrapper = AlbumentationsWrapper(A.HorizontalFlip(p=1.0))
-        >>> image = Image.open("image.jpg")
+        >>> image = Image.new("RGB", (300, 400))
         >>> target = {"boxes": torch.tensor([[10, 20, 100, 200]]), "labels": torch.tensor([1])}
         >>> aug_image, aug_target = wrapper(image, target)
 
@@ -582,6 +582,8 @@ class ComposeAugmentations:
         >>> from rfdetr.datasets.aug_config import AUG_CONFIG
         >>> aug_transforms = AlbumentationsWrapper.from_config(AUG_CONFIG)
         >>> composed = ComposeAugmentations(aug_transforms)
+        >>> image = Image.new("RGB", (100, 100))
+        >>> target = {"boxes": torch.zeros((0, 4)), "labels": torch.zeros(0, dtype=torch.long)}
         >>> image, target = composed(image, target)
     """
 
