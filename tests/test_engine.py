@@ -7,7 +7,7 @@
 from collections import defaultdict
 from contextlib import nullcontext
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
@@ -20,7 +20,10 @@ from rfdetr.engine import (
     _get_cuda_autocast_dtype,
     _match_single_class,
     build_matching_data,
+    distributed_merge_matching_data,
     evaluate,
+    init_matching_accumulator,
+    merge_matching_data,
     train_one_epoch,
 )
 from rfdetr.util.misc import NestedTensor
@@ -528,3 +531,134 @@ class TestBuildMatchingData:
         assert 99 in result
         assert result[99]["total_gt"] == 0
         assert result[99]["matches"][0] == 0
+
+
+# ---------------------------------------------------------------------------
+# Helper shared by TestMergeMatchingData and TestDistributedMergeMatchingData
+# (used by multiple classes, so module-level rather than a staticmethod)
+# ---------------------------------------------------------------------------
+
+
+def _make_matching_entry(
+    scores: list,
+    matches: list,
+    ignore: list,
+    total_gt: int,
+) -> dict:
+    """Return a compact matching dict as produced by ``build_matching_data()``."""
+    return {
+        "scores": np.array(scores, dtype=np.float32),
+        "matches": np.array(matches, dtype=np.int64),
+        "ignore": np.array(ignore, dtype=bool),
+        "total_gt": total_gt,
+    }
+
+
+class TestInitMatchingAccumulator:
+    """init_matching_accumulator() returns a correct empty accumulator."""
+
+    def test_returns_empty_dict(self) -> None:
+        """Returns an empty dict."""
+        assert init_matching_accumulator() == {}
+
+    def test_returned_dict_is_mutable_via_merge(self) -> None:
+        """The returned dict can be populated by merge_matching_data."""
+        acc = init_matching_accumulator()
+        merge_matching_data(acc, {0: _make_matching_entry([0.9], [1], [False], 1)})
+        assert 0 in acc
+
+
+class TestMergeMatchingData:
+    """merge_matching_data() correctly accumulates per-class matching dicts."""
+
+    def test_empty_accumulator_copies_new_data(self) -> None:
+        """First merge populates the accumulator with the batch data."""
+        data = _make_matching_entry([0.9, 0.8], [1, 0], [False, False], 1)
+        acc = merge_matching_data({}, {0: data})
+        np.testing.assert_allclose(acc[0]["scores"], [0.9, 0.8], rtol=1e-6)
+        np.testing.assert_array_equal(acc[0]["matches"], [1, 0])
+        assert acc[0]["total_gt"] == 1
+
+    def test_second_merge_concatenates_arrays_and_sums_total_gt(self) -> None:
+        """Merging a second batch appends scores/matches/ignore and sums total_gt."""
+        acc: dict = {}
+        merge_matching_data(acc, {0: _make_matching_entry([0.9], [1], [False], 2)})
+        merge_matching_data(acc, {0: _make_matching_entry([0.7], [0], [False], 3)})
+        np.testing.assert_allclose(acc[0]["scores"], [0.9, 0.7], rtol=1e-6)
+        np.testing.assert_array_equal(acc[0]["matches"], [1, 0])
+        assert acc[0]["total_gt"] == 5
+
+    def test_new_class_added_independently(self) -> None:
+        """A class not yet in the accumulator is added without touching others."""
+        acc = {0: _make_matching_entry([0.9], [1], [False], 1)}
+        merge_matching_data(acc, {1: _make_matching_entry([0.5], [0], [False], 2)})
+        assert acc[0]["total_gt"] == 1
+        assert acc[1]["total_gt"] == 2
+
+    def test_returns_same_accumulator_object(self) -> None:
+        """merge_matching_data returns the same dict it was given (in-place)."""
+        acc: dict = {}
+        result = merge_matching_data(acc, {})
+        assert result is acc
+
+    def test_no_op_when_new_data_is_empty(self) -> None:
+        """Merging an empty batch leaves the accumulator unchanged."""
+        acc = {0: _make_matching_entry([0.9], [1], [False], 1)}
+        merge_matching_data(acc, {})
+        assert len(acc) == 1
+        assert acc[0]["total_gt"] == 1
+
+    def test_copied_arrays_are_independent_of_source(self) -> None:
+        """Mutating the source entry after the first merge must not corrupt acc."""
+        data = _make_matching_entry([0.9], [1], [False], 1)
+        acc: dict = {}
+        merge_matching_data(acc, {0: data})
+        data["scores"][0] = 0.0
+        assert acc[0]["scores"][0] == pytest.approx(0.9)
+
+    def test_multiple_classes_in_single_batch_all_added(self) -> None:
+        """All classes present in a single batch are merged into the accumulator."""
+        batch = {
+            0: _make_matching_entry([0.9], [1], [False], 1),
+            1: _make_matching_entry([0.8], [0], [False], 2),
+        }
+        acc = merge_matching_data({}, batch)
+        assert set(acc.keys()) == {0, 1}
+        assert acc[0]["total_gt"] == 1
+        assert acc[1]["total_gt"] == 2
+
+
+class TestDistributedMergeMatchingData:
+    """distributed_merge_matching_data() gathers and merges across DDP ranks."""
+
+    def test_single_rank_returns_same_content(self) -> None:
+        """In single-process mode (world_size=1), data passes through unchanged."""
+        local_data = {0: _make_matching_entry([0.9], [1], [False], 1)}
+        result = distributed_merge_matching_data(local_data)
+        np.testing.assert_allclose(result[0]["scores"], [0.9], rtol=1e-6)
+        assert result[0]["total_gt"] == 1
+
+    def test_two_ranks_disjoint_classes(self) -> None:
+        """Two ranks with disjoint classes → merged result contains both."""
+        rank0 = {0: _make_matching_entry([0.9], [1], [False], 1)}
+        rank1 = {1: _make_matching_entry([0.7], [0], [False], 2)}
+        with patch("rfdetr.engine.utils.all_gather", return_value=[rank0, rank1]):
+            result = distributed_merge_matching_data(rank0)
+        assert set(result.keys()) == {0, 1}
+        assert result[0]["total_gt"] == 1
+        assert result[1]["total_gt"] == 2
+
+    def test_two_ranks_overlapping_class_concatenates(self) -> None:
+        """Two ranks sharing class 0 → arrays concatenated, total_gt summed."""
+        rank0 = {0: _make_matching_entry([0.9], [1], [False], 2)}
+        rank1 = {0: _make_matching_entry([0.7, 0.5], [0, 1], [False, False], 3)}
+        with patch("rfdetr.engine.utils.all_gather", return_value=[rank0, rank1]):
+            result = distributed_merge_matching_data(rank0)
+        np.testing.assert_allclose(result[0]["scores"], [0.9, 0.7, 0.5], rtol=1e-6)
+        assert result[0]["total_gt"] == 5
+
+    def test_returns_new_dict_not_input(self) -> None:
+        """Result is a new dict, not a reference to the local input."""
+        local_data = {0: _make_matching_entry([0.9], [1], [False], 1)}
+        result = distributed_merge_matching_data(local_data)
+        assert result is not local_data

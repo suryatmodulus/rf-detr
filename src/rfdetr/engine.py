@@ -425,12 +425,12 @@ def _compute_mask_iou(pred_masks: torch.Tensor, gt_masks: torch.Tensor) -> torch
     """
     n = pred_masks.shape[0]
     m = gt_masks.shape[0]
-    pred_flat = pred_masks.bool().view(n, -1).float()   # [N, HW]
-    gt_flat = gt_masks.bool().view(m, -1).float()       # [M, HW]
-    inter = torch.mm(pred_flat, gt_flat.t())             # [N, M]
-    pred_area = pred_flat.sum(dim=1, keepdim=True)       # [N, 1]
-    gt_area = gt_flat.sum(dim=1, keepdim=True)           # [M, 1]
-    union = pred_area + gt_area.t() - inter              # [N, M]
+    pred_flat = pred_masks.bool().view(n, -1).float()  # [N, HW]
+    gt_flat = gt_masks.bool().view(m, -1).float()  # [M, HW]
+    inter = torch.mm(pred_flat, gt_flat.t())  # [N, M]
+    pred_area = pred_flat.sum(dim=1, keepdim=True)  # [N, 1]
+    gt_area = gt_flat.sum(dim=1, keepdim=True)  # [M, 1]
+    union = pred_area + gt_area.t() - inter  # [N, M]
     return torch.where(union > 0, inter / union, torch.zeros_like(inter))
 
 
@@ -473,7 +473,7 @@ def _match_single_class(
     if iou_type == "bbox":
         from torchvision.ops import box_iou
 
-        iou_matrix = box_iou(pred_sorted, gt_items)        # [N, M]
+        iou_matrix = box_iou(pred_sorted, gt_items)  # [N, M]
     else:
         iou_matrix = _compute_mask_iou(pred_sorted, gt_items)  # [N, M]
 
@@ -555,14 +555,14 @@ def build_matching_data(
     acc: dict[int, dict[str, list | int]] = {}
 
     for preds, targets in zip(preds_list, targets_list):
-        pred_boxes = preds["boxes"]                          # [N, 4]
-        pred_scores = preds["scores"]                        # [N]
-        pred_labels = preds["labels"]                        # [N]
-        pred_masks = preds.get("masks")                      # [N, H, W] | None
+        pred_boxes = preds["boxes"]  # [N, 4]
+        pred_scores = preds["scores"]  # [N]
+        pred_labels = preds["labels"]  # [N]
+        pred_masks = preds.get("masks")  # [N, H, W] | None
 
-        gt_boxes = targets["boxes"]                          # [M, 4]
-        gt_labels = targets["labels"]                        # [M]
-        gt_masks = targets.get("masks")                      # [M, H, W] | None
+        gt_boxes = targets["boxes"]  # [M, 4]
+        gt_labels = targets["labels"]  # [M]
+        gt_masks = targets.get("masks")  # [M, H, W] | None
         raw_crowd = targets.get(
             "iscrowd",
             torch.zeros(len(gt_labels), dtype=torch.long, device=gt_labels.device),
@@ -598,15 +598,13 @@ def build_matching_data(
                 continue
 
             if iou_type == "bbox":
-                p_items: torch.Tensor = pred_boxes[pred_mask_c]   # [n_pred, 4]
-                gt_items: torch.Tensor = gt_boxes[gt_mask_c]      # [n_gt, 4]
+                p_items: torch.Tensor = pred_boxes[pred_mask_c]  # [n_pred, 4]
+                gt_items: torch.Tensor = gt_boxes[gt_mask_c]  # [n_gt, 4]
             else:
                 if pred_masks is None or gt_masks is None:
-                    raise ValueError(
-                        "iou_type='segm' requires 'masks' in both preds and targets"
-                    )
-                p_items = pred_masks[pred_mask_c]   # [n_pred, H, W]
-                gt_items = gt_masks[gt_mask_c]      # [n_gt, H, W]
+                    raise ValueError("iou_type='segm' requires 'masks' in both preds and targets")
+                p_items = pred_masks[pred_mask_c]  # [n_pred, H, W]
+                gt_items = gt_masks[gt_mask_c]  # [n_gt, H, W]
 
             scores_np, matches_np, ignore_np, total_gt = _match_single_class(
                 p_scores, p_items, gt_items, gt_crowd_c, iou_threshold, iou_type
@@ -626,6 +624,72 @@ def build_matching_data(
         }
         for class_id, data in acc.items()
     }
+
+
+def init_matching_accumulator() -> dict[int, dict[str, Any]]:
+    """Return an empty matching accumulator compatible with ``merge_matching_data()``.
+
+    Returns:
+        Empty dict to be passed as the first argument to ``merge_matching_data()``.
+    """
+    return {}
+
+
+def merge_matching_data(
+    accumulator: dict[int, dict[str, Any]],
+    new_data: dict[int, dict[str, Any]],
+) -> dict[int, dict[str, Any]]:
+    """Merge *new_data* into *accumulator* in place.
+
+    Both arguments share the dict schema produced by ``build_matching_data()``:
+    each class-keyed sub-dict contains ``"scores"`` (float32 ndarray),
+    ``"matches"`` (int64 ndarray), ``"ignore"`` (bool ndarray), and
+    ``"total_gt"`` (int).
+
+    Args:
+        accumulator: Running accumulator, modified in place.
+        new_data: Batch-level matching data to merge in.
+
+    Returns:
+        The modified *accumulator* (same object, for method chaining).
+    """
+    for class_id, data in new_data.items():
+        if class_id not in accumulator:
+            accumulator[class_id] = {
+                "scores": data["scores"].copy(),
+                "matches": data["matches"].copy(),
+                "ignore": data["ignore"].copy(),
+                "total_gt": data["total_gt"],
+            }
+        else:
+            entry = accumulator[class_id]
+            entry["scores"] = np.concatenate([entry["scores"], data["scores"]])
+            entry["matches"] = np.concatenate([entry["matches"], data["matches"]])
+            entry["ignore"] = np.concatenate([entry["ignore"], data["ignore"]])
+            entry["total_gt"] += data["total_gt"]
+    return accumulator
+
+
+def distributed_merge_matching_data(
+    local_data: dict[int, dict[str, Any]],
+) -> dict[int, dict[str, Any]]:
+    """Gather per-rank matching data from all DDP ranks and merge into one dict.
+
+    Uses ``utils.all_gather`` (pickle-based) so the data need not be a tensor.
+    In single-process (non-distributed) mode, returns a merged copy of *local_data*
+    unchanged.
+
+    Args:
+        local_data: Per-rank accumulator produced by ``merge_matching_data()``.
+
+    Returns:
+        Merged accumulator containing contributions from all ranks.
+    """
+    gathered: List[dict[int, dict[str, Any]]] = utils.all_gather(local_data)
+    merged: dict[int, dict[str, Any]] = {}
+    for rank_data in gathered:
+        merge_matching_data(merged, rank_data)
+    return merged
 
 
 def evaluate(model, criterion, postprocess, data_loader, base_ds, device, args=None, header="Eval"):
