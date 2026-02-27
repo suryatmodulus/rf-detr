@@ -4,11 +4,18 @@
 # Licensed under the Apache License, Version 2.0 [see LICENSE for details]
 # ------------------------------------------------------------------------
 
-"""Package-private helper: map Pydantic configs to the legacy argparse.Namespace."""
+"""Package-private helper: map Pydantic configs to the legacy argparse.Namespace.
+
+TODO(Chapter 6): delete this entire module when populate_args() and main.py
+    are removed (Phase 9).  Callers in module.py / datamodule.py should then
+    read from model_config / train_config directly.
+"""
 
 from typing import Any
 
 from rfdetr.config import ModelConfig, TrainConfig
+
+# TODO(Chapter 6): remove this import when main.py is deleted.
 from rfdetr.main import populate_args
 
 

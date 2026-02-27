@@ -15,6 +15,8 @@ from torch.utils.data import DataLoader
 
 from rfdetr.config import ModelConfig, TrainConfig
 from rfdetr.datasets import build_dataset
+
+# TODO(Chapter 6): remove this import when _args.py is deleted.
 from rfdetr.lit._args import _build_args_from_configs
 from rfdetr.util.logger import get_logger
 from rfdetr.util.misc import collate_fn
@@ -40,6 +42,7 @@ class RFDETRDataModule(LightningDataModule):
         super().__init__()
         self.model_config = model_config
         self.train_config = train_config
+        # TODO(Chapter 6): remove _args; read from model_config / train_config directly.
         self._args = self._build_args()
 
         self._dataset_train: Optional[torch.utils.data.Dataset] = None
@@ -50,6 +53,7 @@ class RFDETRDataModule(LightningDataModule):
     # Helpers
     # ------------------------------------------------------------------
 
+    # TODO(Chapter 6): delete _build_args() when _args.py / populate_args() are removed.
     def _build_args(self) -> Any:
         """Map Pydantic configs to the legacy argparse.Namespace.
 

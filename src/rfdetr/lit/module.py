@@ -18,6 +18,8 @@ from pytorch_lightning import LightningModule
 from rfdetr.assets.model_weights import download_pretrain_weights, validate_pretrain_weights
 from rfdetr.config import ModelConfig, TrainConfig
 from rfdetr.datasets.coco import compute_multi_scale_scales
+
+# TODO(Chapter 6): remove this import when _args.py is deleted.
 from rfdetr.lit._args import _build_args_from_configs
 from rfdetr.models import build_criterion_and_postprocessors, build_model
 from rfdetr.util.drop_scheduler import drop_scheduler
@@ -45,7 +47,7 @@ class RFDETRModule(LightningModule):
         self.model_config = model_config
         self.train_config = train_config
 
-        # Build legacy args Namespace expected by existing build_* functions.
+        # TODO(Chapter 6): remove _args; read from model_config / train_config directly.
         self._args = self._build_args()
 
         # Model, criterion, and postprocessor.
@@ -64,6 +66,7 @@ class RFDETRModule(LightningModule):
     # Helpers
     # ------------------------------------------------------------------
 
+    # TODO(Chapter 6): delete _build_args() when _args.py / populate_args() are removed.
     def _build_args(self) -> Any:
         """Map Pydantic configs to the legacy argparse.Namespace.
 
