@@ -15,6 +15,11 @@ the tolerances specified in MIGRATION_PT_LIGHTNING.md Chapter 2:
 The intermediate scenario (2 classes, mixed TP/FP, varying confidence)
 mirrors the ``intermediate_scenario_cocoeval`` fixture in
 ``tests/util/test_metrics.py`` so the same data drives both paths.
+
+Module-scoped fixtures (``detection_parity``, ``segmentation_parity``,
+``perfect_parity``, ``degenerate_parity``) compute each scenario once and
+share the ``(legacy_dict, new_dict)`` result across all tests in the module,
+avoiding repeated COCOeval calls.
 """
 
 import math
@@ -58,7 +63,7 @@ _SEGM_ROW_SPACING = 55
 
 
 # ---------------------------------------------------------------------------
-# Shared scenario builder
+# Shared scenario builder helpers
 # ---------------------------------------------------------------------------
 
 
@@ -136,6 +141,59 @@ def _build_intermediate_scenario() -> dict:
     for i, conf in enumerate(class2_fp_confs):
         fp_box = [float(i * _BOX_SPACING), float(2 * _ROW_SPACING), float(_BOX_SIZE), float(_BOX_SIZE)]
         pred_abs_xywh.append((2, fp_box, conf))
+
+    return {
+        "image_id": image_id,
+        "image_width": image_width,
+        "image_height": image_height,
+        "categories": [{"id": 1, "name": "class_1"}, {"id": 2, "name": "class_2"}],
+        "gt_abs_xywh": gt_abs_xywh,
+        "pred_abs_xywh": pred_abs_xywh,
+    }
+
+
+def _build_perfect_scenario() -> dict:
+    """Two classes, 5 GTs each with IoU=0.96 TP predictions, score=1.0."""
+    image_id = 1
+    image_width = 5 * _BOX_SPACING
+    image_height = 2 * _ROW_SPACING
+
+    gt_abs_xywh: list[tuple[int, list[float]]] = []
+    pred_abs_xywh: list[tuple[int, list[float], float]] = []
+
+    for cat_id, row_y in [(1, 0), (2, _ROW_SPACING)]:
+        for i in range(5):
+            gt_box = [float(i * _BOX_SPACING), float(row_y), float(_BOX_SIZE), float(_BOX_SIZE)]
+            pred_box = _make_contained_pred_box(gt_box, target_iou=0.96)
+            gt_abs_xywh.append((cat_id, gt_box))
+            pred_abs_xywh.append((cat_id, pred_box, 1.0))
+
+    return {
+        "image_id": image_id,
+        "image_width": image_width,
+        "image_height": image_height,
+        "categories": [{"id": 1, "name": "class_1"}, {"id": 2, "name": "class_2"}],
+        "gt_abs_xywh": gt_abs_xywh,
+        "pred_abs_xywh": pred_abs_xywh,
+    }
+
+
+def _build_degenerate_scenario() -> dict:
+    """Two classes: GTs on left, FP predictions on right (IoU=0), score=1.0."""
+    image_id = 1
+    pred_x_offset = 5 * _BOX_SPACING + 100  # gap ensures zero IoU
+    image_width = pred_x_offset + 5 * _BOX_SPACING
+    image_height = 2 * _ROW_SPACING
+
+    gt_abs_xywh: list[tuple[int, list[float]]] = []
+    pred_abs_xywh: list[tuple[int, list[float], float]] = []
+
+    for cat_id, row_y in [(1, 0), (2, _ROW_SPACING)]:
+        for i in range(5):
+            gt_box = [float(i * _BOX_SPACING), float(row_y), float(_BOX_SIZE), float(_BOX_SIZE)]
+            fp_box = [float(pred_x_offset + i * _BOX_SPACING), float(row_y), float(_BOX_SIZE), float(_BOX_SIZE)]
+            gt_abs_xywh.append((cat_id, gt_box))
+            pred_abs_xywh.append((cat_id, fp_box, 1.0))
 
     return {
         "image_id": image_id,
@@ -288,181 +346,6 @@ def _run_callback(scenario: dict) -> dict:
     cb.on_validation_epoch_end(trainer, module)
 
     return logged
-
-
-# ---------------------------------------------------------------------------
-# Parity tests — mAP50
-# ---------------------------------------------------------------------------
-
-
-class TestMAPParityDetection:
-    """val/mAP_50 from COCOEvalCallback agrees with legacy COCOeval.
-
-    Tolerance: ``|Δ mAP50| ≤ 0.005``.
-    """
-
-    def test_map50_within_tolerance(self) -> None:
-        """|Δ mAP50| ≤ 0.005 on the intermediate scenario."""
-        scenario = _build_intermediate_scenario()
-        legacy = _run_legacy(scenario)
-        new = _run_callback(scenario)
-
-        delta = abs(legacy["map50"] - new["val/mAP_50"])
-        assert delta <= _MAP50_TOL, (
-            f"mAP50 parity failed: legacy={legacy['map50']:.4f}, "
-            f"new={new['val/mAP_50']:.4f}, delta={delta:.4f} > {_MAP50_TOL}"
-        )
-
-    def test_map50_95_is_logged(self) -> None:
-        """val/mAP_50_95 is always logged.
-
-        Note: torchmetrics returns -1.0 as a sentinel when ``map`` cannot be
-        computed with non-default ``max_detection_thresholds`` (e.g. 500).
-        The assertion only verifies the key is present; use ``val/mAP_50`` for
-        numeric comparisons.
-        """
-        new = _run_callback(_build_intermediate_scenario())
-        assert "val/mAP_50_95" in new
-
-    def test_mar_logged_and_nonnegative(self) -> None:
-        """val/mAR is logged and non-negative."""
-        new = _run_callback(_build_intermediate_scenario())
-        assert "val/mAR" in new
-        assert new["val/mAR"] >= 0.0
-
-
-# ---------------------------------------------------------------------------
-# Parity tests — F1 / precision / recall
-# ---------------------------------------------------------------------------
-
-
-class TestF1ParityDetection:
-    """F1, precision, recall from COCOEvalCallback agree with legacy path.
-
-    Tolerance: ``|Δ| ≤ 0.01`` for all three metrics.
-    """
-
-    def test_f1_within_tolerance(self) -> None:
-        """|Δ F1| ≤ 0.01 on the intermediate scenario."""
-        scenario = _build_intermediate_scenario()
-        legacy = _run_legacy(scenario)
-        new = _run_callback(scenario)
-
-        delta = abs(legacy["f1"] - new["val/F1"])
-        assert delta <= _F1_TOL, (
-            f"F1 parity failed: legacy={legacy['f1']:.4f}, new={new['val/F1']:.4f}, delta={delta:.4f} > {_F1_TOL}"
-        )
-
-    def test_precision_within_tolerance(self) -> None:
-        """|Δ precision| ≤ 0.01 on the intermediate scenario."""
-        scenario = _build_intermediate_scenario()
-        legacy = _run_legacy(scenario)
-        new = _run_callback(scenario)
-
-        delta = abs(legacy["precision"] - new["val/precision"])
-        assert delta <= _F1_TOL, (
-            f"Precision parity failed: legacy={legacy['precision']:.4f}, "
-            f"new={new['val/precision']:.4f}, delta={delta:.4f} > {_F1_TOL}"
-        )
-
-    def test_recall_within_tolerance(self) -> None:
-        """|Δ recall| ≤ 0.01 on the intermediate scenario."""
-        scenario = _build_intermediate_scenario()
-        legacy = _run_legacy(scenario)
-        new = _run_callback(scenario)
-
-        delta = abs(legacy["recall"] - new["val/recall"])
-        assert delta <= _F1_TOL, (
-            f"Recall parity failed: legacy={legacy['recall']:.4f}, "
-            f"new={new['val/recall']:.4f}, delta={delta:.4f} > {_F1_TOL}"
-        )
-
-
-# ---------------------------------------------------------------------------
-# Sanity-check parity at the boundary scenarios
-# ---------------------------------------------------------------------------
-
-
-class TestBoundaryScenarioParity:
-    """Both paths report consistent values on boundary (all-TP, all-FP) scenarios."""
-
-    def _build_perfect_scenario(self) -> dict:
-        """Two classes, 5 GTs each with IoU=0.96 TP predictions, score=1.0."""
-        image_id = 1
-        image_width = 5 * _BOX_SPACING
-        image_height = 2 * _ROW_SPACING
-
-        gt_abs_xywh: list[tuple[int, list[float]]] = []
-        pred_abs_xywh: list[tuple[int, list[float], float]] = []
-
-        for cat_id, row_y in [(1, 0), (2, _ROW_SPACING)]:
-            for i in range(5):
-                gt_box = [float(i * _BOX_SPACING), float(row_y), float(_BOX_SIZE), float(_BOX_SIZE)]
-                pred_box = _make_contained_pred_box(gt_box, target_iou=0.96)
-                gt_abs_xywh.append((cat_id, gt_box))
-                pred_abs_xywh.append((cat_id, pred_box, 1.0))
-
-        return {
-            "image_id": image_id,
-            "image_width": image_width,
-            "image_height": image_height,
-            "categories": [{"id": 1, "name": "class_1"}, {"id": 2, "name": "class_2"}],
-            "gt_abs_xywh": gt_abs_xywh,
-            "pred_abs_xywh": pred_abs_xywh,
-        }
-
-    def _build_degenerate_scenario(self) -> dict:
-        """Two classes: GTs on left, FP predictions on right (IoU=0), score=1.0."""
-        image_id = 1
-        pred_x_offset = 5 * _BOX_SPACING + 100  # gap ensures zero IoU
-        image_width = pred_x_offset + 5 * _BOX_SPACING
-        image_height = 2 * _ROW_SPACING
-
-        gt_abs_xywh: list[tuple[int, list[float]]] = []
-        pred_abs_xywh: list[tuple[int, list[float], float]] = []
-
-        for cat_id, row_y in [(1, 0), (2, _ROW_SPACING)]:
-            for i in range(5):
-                gt_box = [float(i * _BOX_SPACING), float(row_y), float(_BOX_SIZE), float(_BOX_SIZE)]
-                fp_box = [float(pred_x_offset + i * _BOX_SPACING), float(row_y), float(_BOX_SIZE), float(_BOX_SIZE)]
-                gt_abs_xywh.append((cat_id, gt_box))
-                pred_abs_xywh.append((cat_id, fp_box, 1.0))
-
-        return {
-            "image_id": image_id,
-            "image_width": image_width,
-            "image_height": image_height,
-            "categories": [{"id": 1, "name": "class_1"}, {"id": 2, "name": "class_2"}],
-            "gt_abs_xywh": gt_abs_xywh,
-            "pred_abs_xywh": pred_abs_xywh,
-        }
-
-    def test_perfect_scenario_map50_near_one(self) -> None:
-        """Both paths report mAP50 ≥ 0.99 on the perfect scenario."""
-        scenario = self._build_perfect_scenario()
-        legacy = _run_legacy(scenario)
-        new = _run_callback(scenario)
-
-        assert legacy["map50"] >= 0.99, f"Legacy mAP50 unexpectedly low: {legacy['map50']:.4f}"
-        assert new["val/mAP_50"] >= 0.99, f"Callback mAP50 unexpectedly low: {new['val/mAP_50']:.4f}"
-
-    def test_perfect_scenario_f1_near_one(self) -> None:
-        """Both paths report F1 ≥ 0.99 on the perfect scenario."""
-        scenario = self._build_perfect_scenario()
-        legacy = _run_legacy(scenario)
-        new = _run_callback(scenario)
-
-        assert legacy["f1"] >= 0.99, f"Legacy F1 unexpectedly low: {legacy['f1']:.4f}"
-        assert new["val/F1"] >= 0.99, f"Callback F1 unexpectedly low: {new['val/F1']:.4f}"
-
-    def test_degenerate_scenario_f1_is_zero(self) -> None:
-        """Both paths report F1 = 0.0 on the degenerate (all-FP) scenario."""
-        scenario = self._build_degenerate_scenario()
-        legacy = _run_legacy(scenario)
-        new = _run_callback(scenario)
-
-        assert legacy["f1"] == pytest.approx(0.0), f"Legacy F1 should be 0, got {legacy['f1']:.4f}"
-        assert new["val/F1"] == pytest.approx(0.0), f"Callback F1 should be 0, got {new['val/F1']:.4f}"
 
 
 # ---------------------------------------------------------------------------
@@ -701,6 +584,143 @@ def _run_callback_segm(scenario: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Module-scoped fixtures — compute each scenario once, share across tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def detection_parity():
+    """``(legacy_dict, new_dict)`` for the intermediate detection scenario.
+
+    Runs ``_build_intermediate_scenario`` → ``_run_legacy`` → ``_run_callback``
+    exactly once for the entire test module; all detection parity tests share
+    the result.
+    """
+    scenario = _build_intermediate_scenario()
+    return _run_legacy(scenario), _run_callback(scenario)
+
+
+@pytest.fixture(scope="module")
+def segmentation_parity():
+    """``(legacy_dict, new_dict)`` for the segmentation scenario.
+
+    Runs ``_build_segmentation_scenario`` → ``_run_legacy_segm`` → ``_run_callback_segm``
+    exactly once for the entire test module.
+    """
+    scenario = _build_segmentation_scenario()
+    return _run_legacy_segm(scenario), _run_callback_segm(scenario)
+
+
+@pytest.fixture(scope="module")
+def perfect_parity():
+    """``(legacy_dict, new_dict)`` for the all-TP boundary scenario."""
+    scenario = _build_perfect_scenario()
+    return _run_legacy(scenario), _run_callback(scenario)
+
+
+@pytest.fixture(scope="module")
+def degenerate_parity():
+    """``(legacy_dict, new_dict)`` for the all-FP boundary scenario."""
+    scenario = _build_degenerate_scenario()
+    return _run_legacy(scenario), _run_callback(scenario)
+
+
+# ---------------------------------------------------------------------------
+# Parity tests — detection mAP50
+# ---------------------------------------------------------------------------
+
+
+class TestMAPParityDetection:
+    """val/mAP_50 from COCOEvalCallback agrees with legacy COCOeval.
+
+    Tolerance: ``|Δ mAP50| ≤ 0.005``.
+    """
+
+    def test_map50_within_tolerance(self, detection_parity) -> None:
+        """|Δ mAP50| ≤ 0.005 on the intermediate scenario."""
+        legacy, new = detection_parity
+        delta = abs(legacy["map50"] - new["val/mAP_50"])
+        assert delta <= _MAP50_TOL, (
+            f"mAP50 parity failed: legacy={legacy['map50']:.4f}, "
+            f"new={new['val/mAP_50']:.4f}, delta={delta:.4f} > {_MAP50_TOL}"
+        )
+
+    def test_map50_95_is_logged(self, detection_parity) -> None:
+        """val/mAP_50_95 is always logged.
+
+        Note: torchmetrics returns -1.0 as a sentinel when ``map`` cannot be
+        computed with non-default ``max_detection_thresholds`` (e.g. 500).
+        The assertion only verifies the key is present; use ``val/mAP_50`` for
+        numeric comparisons.
+        """
+        _, new = detection_parity
+        assert "val/mAP_50_95" in new
+
+    def test_mar_logged_and_nonnegative(self, detection_parity) -> None:
+        """val/mAR is logged and non-negative."""
+        _, new = detection_parity
+        assert "val/mAR" in new
+        assert new["val/mAR"] >= 0.0
+
+
+# ---------------------------------------------------------------------------
+# Parity tests — detection F1 / precision / recall
+# ---------------------------------------------------------------------------
+
+
+class TestF1ParityDetection:
+    """F1, precision, recall from COCOEvalCallback agree with legacy path.
+
+    Tolerance: ``|Δ| ≤ 0.01`` for all three metrics.
+    """
+
+    @pytest.mark.parametrize(
+        "legacy_key, new_key",
+        [
+            pytest.param("f1", "val/F1", id="f1"),
+            pytest.param("precision", "val/precision", id="precision"),
+            pytest.param("recall", "val/recall", id="recall"),
+        ],
+    )
+    def test_metric_within_tolerance(self, detection_parity, legacy_key, new_key) -> None:
+        """|Δ metric| ≤ 0.01 on the intermediate scenario."""
+        legacy, new = detection_parity
+        delta = abs(legacy[legacy_key] - new[new_key])
+        assert delta <= _F1_TOL, (
+            f"{legacy_key} parity failed: legacy={legacy[legacy_key]:.4f}, "
+            f"new={new[new_key]:.4f}, delta={delta:.4f} > {_F1_TOL}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Sanity-check parity at the boundary scenarios
+# ---------------------------------------------------------------------------
+
+
+class TestBoundaryScenarioParity:
+    """Both paths report consistent values on boundary (all-TP, all-FP) scenarios."""
+
+    @pytest.mark.parametrize(
+        "legacy_key, new_key",
+        [
+            pytest.param("map50", "val/mAP_50", id="map50"),
+            pytest.param("f1", "val/F1", id="f1"),
+        ],
+    )
+    def test_perfect_scenario_near_one(self, perfect_parity, legacy_key, new_key) -> None:
+        """Both paths report metric ≥ 0.99 on the perfect scenario."""
+        legacy, new = perfect_parity
+        assert legacy[legacy_key] >= 0.99, f"Legacy {legacy_key} unexpectedly low: {legacy[legacy_key]:.4f}"
+        assert new[new_key] >= 0.99, f"Callback {new_key} unexpectedly low: {new[new_key]:.4f}"
+
+    def test_degenerate_scenario_f1_is_zero(self, degenerate_parity) -> None:
+        """Both paths report F1 = 0.0 on the degenerate (all-FP) scenario."""
+        legacy, new = degenerate_parity
+        assert legacy["f1"] == pytest.approx(0.0), f"Legacy F1 should be 0, got {legacy['f1']:.4f}"
+        assert new["val/F1"] == pytest.approx(0.0), f"Callback F1 should be 0, got {new['val/F1']:.4f}"
+
+
+# ---------------------------------------------------------------------------
 # Parity tests — segmentation mAP50
 # ---------------------------------------------------------------------------
 
@@ -711,21 +731,18 @@ class TestMAPParitySegmentation:
     Tolerance: ``|Δ mask mAP50| ≤ 0.005``.
     """
 
-    def test_segm_map50_within_tolerance(self) -> None:
+    def test_segm_map50_within_tolerance(self, segmentation_parity) -> None:
         """|Δ mask mAP50| ≤ 0.005 on the segmentation scenario."""
-        scenario = _build_segmentation_scenario()
-        legacy = _run_legacy_segm(scenario)
-        new = _run_callback_segm(scenario)
-
+        legacy, new = segmentation_parity
         delta = abs(legacy["map50"] - new["val/segm_mAP_50"])
         assert delta <= _MAP50_TOL, (
             f"Segm mAP50 parity failed: legacy={legacy['map50']:.4f}, "
             f"new={new['val/segm_mAP_50']:.4f}, delta={delta:.4f} > {_MAP50_TOL}"
         )
 
-    def test_segm_map50_95_is_logged(self) -> None:
+    def test_segm_map50_95_is_logged(self, segmentation_parity) -> None:
         """val/segm_mAP_50_95 is always logged in segmentation mode."""
-        new = _run_callback_segm(_build_segmentation_scenario())
+        _, new = segmentation_parity
         assert "val/segm_mAP_50_95" in new
 
 
@@ -744,37 +761,19 @@ class TestF1ParitySegmentation:
     ``COCOeval(iouType='segm')`` + ``coco_extended_metrics()``.
     """
 
-    def test_segm_f1_within_tolerance(self) -> None:
-        """|Δ mask F1| ≤ 0.01 on the segmentation scenario."""
-        scenario = _build_segmentation_scenario()
-        legacy = _run_legacy_segm(scenario)
-        new = _run_callback_segm(scenario)
-
-        delta = abs(legacy["f1"] - new["val/F1"])
+    @pytest.mark.parametrize(
+        "legacy_key, new_key",
+        [
+            pytest.param("f1", "val/F1", id="f1"),
+            pytest.param("precision", "val/precision", id="precision"),
+            pytest.param("recall", "val/recall", id="recall"),
+        ],
+    )
+    def test_segm_metric_within_tolerance(self, segmentation_parity, legacy_key, new_key) -> None:
+        """|Δ metric| ≤ 0.01 on the segmentation scenario."""
+        legacy, new = segmentation_parity
+        delta = abs(legacy[legacy_key] - new[new_key])
         assert delta <= _F1_TOL, (
-            f"Segm F1 parity failed: legacy={legacy['f1']:.4f}, new={new['val/F1']:.4f}, delta={delta:.4f} > {_F1_TOL}"
-        )
-
-    def test_segm_precision_within_tolerance(self) -> None:
-        """|Δ mask precision| ≤ 0.01 on the segmentation scenario."""
-        scenario = _build_segmentation_scenario()
-        legacy = _run_legacy_segm(scenario)
-        new = _run_callback_segm(scenario)
-
-        delta = abs(legacy["precision"] - new["val/precision"])
-        assert delta <= _F1_TOL, (
-            f"Segm precision parity failed: legacy={legacy['precision']:.4f}, "
-            f"new={new['val/precision']:.4f}, delta={delta:.4f} > {_F1_TOL}"
-        )
-
-    def test_segm_recall_within_tolerance(self) -> None:
-        """|Δ mask recall| ≤ 0.01 on the segmentation scenario."""
-        scenario = _build_segmentation_scenario()
-        legacy = _run_legacy_segm(scenario)
-        new = _run_callback_segm(scenario)
-
-        delta = abs(legacy["recall"] - new["val/recall"])
-        assert delta <= _F1_TOL, (
-            f"Segm recall parity failed: legacy={legacy['recall']:.4f}, "
-            f"new={new['val/recall']:.4f}, delta={delta:.4f} > {_F1_TOL}"
+            f"Segm {legacy_key} parity failed: legacy={legacy[legacy_key]:.4f}, "
+            f"new={new[new_key]:.4f}, delta={delta:.4f} > {_F1_TOL}"
         )

@@ -8,61 +8,7 @@
 
 import pytest
 
-from rfdetr.config import RFDETRBaseConfig, SegmentationTrainConfig, TrainConfig
 from rfdetr.lit._args import _build_args_from_configs
-
-
-def _base_model_config(**overrides):
-    defaults = dict(pretrain_weights=None, device="cpu", num_classes=5)
-    defaults.update(overrides)
-    return RFDETRBaseConfig(**defaults)
-
-
-def _base_train_config(tmp_path, **overrides):
-    defaults = dict(
-        dataset_dir=str(tmp_path / "dataset"),
-        output_dir=str(tmp_path / "output"),
-        epochs=10,
-        lr=1e-4,
-        lr_encoder=1.5e-4,
-        batch_size=2,
-        weight_decay=1e-4,
-        lr_drop=8,
-        warmup_epochs=1.0,
-        drop_path=0.0,
-        multi_scale=False,
-        expanded_scales=False,
-        do_random_resize_via_padding=False,
-        grad_accum_steps=1,
-        tensorboard=False,
-    )
-    defaults.update(overrides)
-    return TrainConfig(**defaults)
-
-
-@pytest.fixture
-def base_model_config():
-    return _base_model_config
-
-
-@pytest.fixture
-def base_train_config(tmp_path):
-    return lambda **overrides: _base_train_config(tmp_path, **overrides)
-
-
-@pytest.fixture
-def seg_train_config(tmp_path):
-    def _make(**overrides):
-        defaults = dict(
-            dataset_dir=str(tmp_path / "dataset"),
-            output_dir=str(tmp_path / "output"),
-            epochs=10,
-            tensorboard=False,
-        )
-        defaults.update(overrides)
-        return SegmentationTrainConfig(**defaults)
-
-    return _make
 
 
 class TestBuildArgsFromConfigs:
@@ -107,9 +53,9 @@ class TestBuildArgsFromConfigs:
         assert args.expanded_scales is True
         assert args.dataset_file == "coco"
 
-    def test_num_queries_from_subclass_config(self, base_train_config):
+    def test_num_queries_from_subclass_config(self, base_model_config, base_train_config):
         """num_queries is read from subclass config attributes."""
-        mc = _base_model_config()  # RFDETRBaseConfig has num_queries=300
+        mc = base_model_config()  # RFDETRBaseConfig has num_queries=300
         args = _build_args_from_configs(mc, base_train_config())
         assert args.num_queries == 300
 
@@ -135,8 +81,8 @@ class TestBuildArgsFromConfigs:
         assert args.mask_ce_loss_coef == pytest.approx(5.0)
         assert args.mask_dice_loss_coef == pytest.approx(5.0)
 
-    def test_segmentation_head_flag_forwarded(self, base_train_config):
+    def test_segmentation_head_flag_forwarded(self, base_model_config, base_train_config):
         """segmentation_head=True from ModelConfig reaches the Namespace."""
-        mc = _base_model_config(segmentation_head=True)
+        mc = base_model_config(segmentation_head=True)
         args = _build_args_from_configs(mc, base_train_config())
         assert args.segmentation_head is True

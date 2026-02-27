@@ -15,7 +15,7 @@ import pytest
 import torch
 from torch import nn
 
-from rfdetr.config import RFDETRBaseConfig, SegmentationTrainConfig, TrainConfig
+from rfdetr.config import RFDETRBaseConfig, TrainConfig
 from rfdetr.util.misc import NestedTensor
 
 # ---------------------------------------------------------------------------
@@ -121,41 +121,6 @@ def _make_batch(batch_size=2, channels=3, h=16, w=16):
 # helpers in test methods.  Class-level _setup_* helpers still use the private
 # functions directly (they cannot inject fixtures themselves).
 # ---------------------------------------------------------------------------
-
-
-@pytest.fixture
-def base_model_config():
-    """Factory fixture — call with **overrides to get a minimal RFDETRBaseConfig."""
-    return _base_model_config
-
-
-@pytest.fixture
-def base_train_config(tmp_path):
-    """Factory fixture — call with **overrides to get a minimal TrainConfig.
-
-    tmp_path is injected automatically so test methods do not need to declare it.
-    """
-    return lambda **overrides: _base_train_config(tmp_path, **overrides)
-
-
-@pytest.fixture
-def seg_train_config(tmp_path):
-    """Factory fixture — call with **overrides to get a minimal SegmentationTrainConfig.
-
-    tmp_path is injected automatically so test methods do not need to declare it.
-    """
-
-    def _make(**overrides):
-        defaults = dict(
-            dataset_dir=str(tmp_path / "dataset"),
-            output_dir=str(tmp_path / "output"),
-            epochs=10,
-            tensorboard=False,
-        )
-        defaults.update(overrides)
-        return SegmentationTrainConfig(**defaults)
-
-    return _make
 
 
 @pytest.fixture

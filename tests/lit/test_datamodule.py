@@ -13,7 +13,7 @@ import torch
 import torch.utils.data
 from torch.utils.data import DataLoader
 
-from rfdetr.config import RFDETRBaseConfig, SegmentationTrainConfig, TrainConfig
+from rfdetr.config import RFDETRBaseConfig, TrainConfig
 
 # ---------------------------------------------------------------------------
 # Private helpers — used by both module-level fixtures and class-level _setup_*
@@ -97,41 +97,6 @@ def _build_datamodule(model_config=None, train_config=None, tmp_path=None):
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
-
-
-@pytest.fixture
-def base_model_config():
-    """Factory fixture — call with **overrides to get a minimal RFDETRBaseConfig."""
-    return _base_model_config
-
-
-@pytest.fixture
-def base_train_config(tmp_path):
-    """Factory fixture — call with **overrides to get a minimal TrainConfig.
-
-    tmp_path is injected automatically so test methods do not need to declare it.
-    """
-    return lambda **overrides: _base_train_config(tmp_path, **overrides)
-
-
-@pytest.fixture
-def seg_train_config(tmp_path):
-    """Factory fixture — call with **overrides to get a minimal SegmentationTrainConfig.
-
-    tmp_path is injected automatically so test methods do not need to declare it.
-    """
-
-    def _make(**overrides):
-        defaults = dict(
-            dataset_dir=str(tmp_path / "dataset"),
-            output_dir=str(tmp_path / "output"),
-            epochs=10,
-            tensorboard=False,
-        )
-        defaults.update(overrides)
-        return SegmentationTrainConfig(**defaults)
-
-    return _make
 
 
 @pytest.fixture
