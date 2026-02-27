@@ -20,12 +20,20 @@ mirrors the ``intermediate_scenario_cocoeval`` fixture in
 import math
 from unittest.mock import MagicMock
 
+import numpy as np
 import pytest
 import torch
+from pycocotools import mask as mask_utils
 from pycocotools.coco import COCO
 from pycocotools.cocoeval import COCOeval
 
-from rfdetr.engine import coco_extended_metrics
+from rfdetr.engine import (
+    build_matching_data,
+    coco_extended_metrics,
+    init_matching_accumulator,
+    merge_matching_data,
+    sweep_confidence_thresholds,
+)
 from rfdetr.lit.callbacks.coco_eval import COCOEvalCallback
 
 # ---------------------------------------------------------------------------
@@ -42,6 +50,11 @@ _F1_TOL = 0.01
 _BOX_SIZE = 200
 _BOX_SPACING = 250
 _ROW_SPACING = 260
+
+# Smaller constants for segmentation scenario (reduces mask memory ~40x)
+_SEGM_BOX_SIZE = 40
+_SEGM_BOX_SPACING = 50
+_SEGM_ROW_SPACING = 55
 
 
 # ---------------------------------------------------------------------------
@@ -337,8 +350,7 @@ class TestF1ParityDetection:
 
         delta = abs(legacy["f1"] - new["val/F1"])
         assert delta <= _F1_TOL, (
-            f"F1 parity failed: legacy={legacy['f1']:.4f}, "
-            f"new={new['val/F1']:.4f}, delta={delta:.4f} > {_F1_TOL}"
+            f"F1 parity failed: legacy={legacy['f1']:.4f}, new={new['val/F1']:.4f}, delta={delta:.4f} > {_F1_TOL}"
         )
 
     def test_precision_within_tolerance(self) -> None:
@@ -451,3 +463,318 @@ class TestBoundaryScenarioParity:
 
         assert legacy["f1"] == pytest.approx(0.0), f"Legacy F1 should be 0, got {legacy['f1']:.4f}"
         assert new["val/F1"] == pytest.approx(0.0), f"Callback F1 should be 0, got {new['val/F1']:.4f}"
+
+
+# ---------------------------------------------------------------------------
+# Segmentation scenario helpers
+# ---------------------------------------------------------------------------
+
+
+def _box_to_bool_mask(box_xywh: list[float], H: int, W: int) -> torch.Tensor:
+    """Return a [H, W] boolean mask with True inside the [x, y, w, h] box.
+
+    Args:
+        box_xywh: COCO-format ``[x, y, w, h]`` (float, absolute pixels).
+        H: Image height in pixels.
+        W: Image width in pixels.
+
+    Returns:
+        Bool tensor of shape ``[H, W]``.
+    """
+    x, y, w, h = box_xywh
+    mask = torch.zeros(H, W, dtype=torch.bool)
+    y1 = max(0, int(round(y)))
+    y2 = min(H, int(round(y + h)))
+    x1 = max(0, int(round(x)))
+    x2 = min(W, int(round(x + w)))
+    mask[y1:y2, x1:x2] = True
+    return mask
+
+
+def _build_segmentation_scenario() -> dict:
+    """Build segmentation scenario: same TP/FP structure as the detection scenario.
+
+    Uses smaller boxes (``_SEGM_BOX_SIZE=40``) to keep boolean mask tensors
+    memory-efficient (~500×165 image).
+
+    Structure mirrors ``_build_intermediate_scenario()``:
+
+    - Class 1: 10 GTs + 10 TP predictions (IoU ≥ 0.525, varying confidence).
+    - Class 2: 10 GTs + 10 TP predictions (IoU ≥ 0.525) + 10 FP predictions
+      (IoU = 0, lower confidence).
+
+    Returns:
+        Same keys as :func:`_build_intermediate_scenario`.
+    """
+    image_id = 1
+    n_boxes = 10
+
+    class1_ious = [0.975, 0.925, 0.875, 0.825, 0.775, 0.725, 0.675, 0.625, 0.575, 0.525]
+    class1_confs = [0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2, 0.1, 0.0]
+
+    class2_ious = [0.975, 0.925, 0.875, 0.825, 0.775, 0.725, 0.675, 0.625, 0.575, 0.525]
+    class2_confs = [0.95, 0.90, 0.85, 0.80, 0.75, 0.70, 0.65, 0.60, 0.55, 0.50]
+    class2_fp_confs = [0.45, 0.40, 0.35, 0.30, 0.25, 0.20, 0.15, 0.10, 0.05, 0.00]
+
+    image_width = n_boxes * _SEGM_BOX_SPACING
+    image_height = 3 * _SEGM_ROW_SPACING
+
+    gt_abs_xywh: list[tuple[int, list[float]]] = []
+    pred_abs_xywh: list[tuple[int, list[float], float]] = []
+
+    for i, (iou, conf) in enumerate(zip(class1_ious, class1_confs)):
+        gt_box = [float(i * _SEGM_BOX_SPACING), 0.0, float(_SEGM_BOX_SIZE), float(_SEGM_BOX_SIZE)]
+        pred_box = _make_contained_pred_box(gt_box, target_iou=iou)
+        gt_abs_xywh.append((1, gt_box))
+        pred_abs_xywh.append((1, pred_box, conf))
+
+    for i, (iou, conf) in enumerate(zip(class2_ious, class2_confs)):
+        gt_box = [
+            float(i * _SEGM_BOX_SPACING),
+            float(_SEGM_ROW_SPACING),
+            float(_SEGM_BOX_SIZE),
+            float(_SEGM_BOX_SIZE),
+        ]
+        pred_box = _make_contained_pred_box(gt_box, target_iou=iou)
+        gt_abs_xywh.append((2, gt_box))
+        pred_abs_xywh.append((2, pred_box, conf))
+
+    for i, conf in enumerate(class2_fp_confs):
+        fp_box = [
+            float(i * _SEGM_BOX_SPACING),
+            float(2 * _SEGM_ROW_SPACING),
+            float(_SEGM_BOX_SIZE),
+            float(_SEGM_BOX_SIZE),
+        ]
+        pred_abs_xywh.append((2, fp_box, conf))
+
+    return {
+        "image_id": image_id,
+        "image_width": image_width,
+        "image_height": image_height,
+        "categories": [{"id": 1, "name": "class_1"}, {"id": 2, "name": "class_2"}],
+        "gt_abs_xywh": gt_abs_xywh,
+        "pred_abs_xywh": pred_abs_xywh,
+    }
+
+
+def _run_legacy_segm(scenario: dict) -> dict:
+    """Run legacy ``COCOeval(iouType='segm')`` on *scenario* data.
+
+    GT annotations use polygon segmentation (box corners); predictions use
+    RLE-encoded binary box masks.
+
+    Args:
+        scenario: Raw scenario dict from :func:`_build_segmentation_scenario`.
+
+    Returns:
+        Dict with keys ``"map50"``, ``"f1"``, ``"precision"``, ``"recall"``.
+    """
+    W = scenario["image_width"]
+    H = scenario["image_height"]
+
+    images = [{"id": scenario["image_id"], "width": W, "height": H}]
+    annotations = []
+    ann_id = 1
+    for cat_id, box in scenario["gt_abs_xywh"]:
+        x, y, w, h = box
+        annotations.append(
+            {
+                "id": ann_id,
+                "image_id": scenario["image_id"],
+                "category_id": cat_id,
+                "bbox": box,
+                "segmentation": [[x, y, x + w, y, x + w, y + h, x, y + h]],
+                "area": w * h,
+                "iscrowd": 0,
+            }
+        )
+        ann_id += 1
+
+    predictions = []
+    for cat_id, box, score in scenario["pred_abs_xywh"]:
+        x, y, w, h = box
+        mask_np = np.zeros((H, W), dtype=np.uint8)
+        y1 = max(0, int(round(y)))
+        y2 = min(H, int(round(y + h)))
+        x1 = max(0, int(round(x)))
+        x2 = min(W, int(round(x + w)))
+        mask_np[y1:y2, x1:x2] = 1
+        rle = mask_utils.encode(np.asfortranarray(mask_np))
+        rle["counts"] = rle["counts"].decode("utf-8")
+        predictions.append(
+            {
+                "image_id": scenario["image_id"],
+                "category_id": cat_id,
+                "segmentation": rle,
+                "score": score,
+            }
+        )
+
+    coco_gt = COCO()
+    coco_gt.dataset = {
+        "images": images,
+        "annotations": annotations,
+        "categories": scenario["categories"],
+    }
+    coco_gt.createIndex()
+    coco_dt = coco_gt.loadRes(predictions)
+    coco_eval = COCOeval(coco_gt, coco_dt, iouType="segm")
+    coco_eval.evaluate()
+    coco_eval.accumulate()
+    coco_eval.summarize()
+
+    metrics = coco_extended_metrics(coco_eval)
+    return {
+        "map50": float(coco_eval.stats[1]),
+        "f1": metrics["f1_score"],
+        "precision": metrics["precision"],
+        "recall": metrics["recall"],
+    }
+
+
+def _run_callback_segm(scenario: dict) -> dict:
+    """Drive :class:`COCOEvalCallback` (segmentation=True) with mask tensors.
+
+    Predictions include stacked [N, H, W] boolean masks; targets include
+    normalised CxCyWH boxes and [M, H, W] boolean masks.
+
+    Args:
+        scenario: Raw scenario dict from :func:`_build_segmentation_scenario`.
+
+    Returns:
+        Dict mapping metric key to float value (same format as
+        :func:`_run_callback`).
+    """
+    W = scenario["image_width"]
+    H = scenario["image_height"]
+
+    pred_boxes_xyxy: list[list[float]] = []
+    pred_scores_list: list[float] = []
+    pred_labels_list: list[int] = []
+    pred_mask_list: list[torch.Tensor] = []
+    for cat_id, box, score in scenario["pred_abs_xywh"]:
+        x, y, w, h = box
+        pred_boxes_xyxy.append([x, y, x + w, y + h])
+        pred_scores_list.append(score)
+        pred_labels_list.append(cat_id)
+        pred_mask_list.append(_box_to_bool_mask(box, H, W))
+
+    preds = [
+        {
+            "boxes": torch.tensor(pred_boxes_xyxy, dtype=torch.float32),
+            "scores": torch.tensor(pred_scores_list, dtype=torch.float32),
+            "labels": torch.tensor(pred_labels_list, dtype=torch.long),
+            "masks": torch.stack(pred_mask_list),  # [N, H, W]
+        }
+    ]
+
+    gt_boxes_norm: list[list[float]] = []
+    gt_labels_list: list[int] = []
+    gt_mask_list: list[torch.Tensor] = []
+    for cat_id, box in scenario["gt_abs_xywh"]:
+        x, y, w, h = box
+        gt_boxes_norm.append([(x + w / 2) / W, (y + h / 2) / H, w / W, h / H])
+        gt_labels_list.append(cat_id)
+        gt_mask_list.append(_box_to_bool_mask(box, H, W))
+
+    targets = [
+        {
+            "boxes": torch.tensor(gt_boxes_norm, dtype=torch.float32),
+            "labels": torch.tensor(gt_labels_list, dtype=torch.long),
+            "masks": torch.stack(gt_mask_list),  # [M, H, W]
+            "orig_size": torch.tensor([H, W]),
+        }
+    ]
+
+    cb = COCOEvalCallback(max_dets=500, segmentation=True)
+    trainer = MagicMock()
+    module = MagicMock()
+    logged: dict[str, float] = {}
+    module.log.side_effect = lambda key, val: logged.__setitem__(key, float(val))
+
+    cb.setup(trainer, module, stage="validate")
+    cb.on_validation_batch_end(trainer, module, {"results": preds, "targets": targets}, None, 0)
+    cb.on_validation_epoch_end(trainer, module)
+
+    return logged
+
+
+# ---------------------------------------------------------------------------
+# Parity tests — segmentation mAP50
+# ---------------------------------------------------------------------------
+
+
+class TestMAPParitySegmentation:
+    """val/segm_mAP_50 from COCOEvalCallback agrees with legacy COCOeval(segm).
+
+    Tolerance: ``|Δ mask mAP50| ≤ 0.005``.
+    """
+
+    def test_segm_map50_within_tolerance(self) -> None:
+        """|Δ mask mAP50| ≤ 0.005 on the segmentation scenario."""
+        scenario = _build_segmentation_scenario()
+        legacy = _run_legacy_segm(scenario)
+        new = _run_callback_segm(scenario)
+
+        delta = abs(legacy["map50"] - new["val/segm_mAP_50"])
+        assert delta <= _MAP50_TOL, (
+            f"Segm mAP50 parity failed: legacy={legacy['map50']:.4f}, "
+            f"new={new['val/segm_mAP_50']:.4f}, delta={delta:.4f} > {_MAP50_TOL}"
+        )
+
+    def test_segm_map50_95_is_logged(self) -> None:
+        """val/segm_mAP_50_95 is always logged in segmentation mode."""
+        new = _run_callback_segm(_build_segmentation_scenario())
+        assert "val/segm_mAP_50_95" in new
+
+
+# ---------------------------------------------------------------------------
+# Parity tests — segmentation F1 / precision / recall
+# ---------------------------------------------------------------------------
+
+
+class TestF1ParitySegmentation:
+    """F1, precision, recall from COCOEvalCallback(segm) agree with legacy path.
+
+    Tolerance: ``|Δ| ≤ 0.01`` for all three metrics.
+
+    The callback computes F1 via ``build_matching_data(iou_type='segm')`` and
+    ``sweep_confidence_thresholds``; the legacy path uses
+    ``COCOeval(iouType='segm')`` + ``coco_extended_metrics()``.
+    """
+
+    def test_segm_f1_within_tolerance(self) -> None:
+        """|Δ mask F1| ≤ 0.01 on the segmentation scenario."""
+        scenario = _build_segmentation_scenario()
+        legacy = _run_legacy_segm(scenario)
+        new = _run_callback_segm(scenario)
+
+        delta = abs(legacy["f1"] - new["val/F1"])
+        assert delta <= _F1_TOL, (
+            f"Segm F1 parity failed: legacy={legacy['f1']:.4f}, new={new['val/F1']:.4f}, delta={delta:.4f} > {_F1_TOL}"
+        )
+
+    def test_segm_precision_within_tolerance(self) -> None:
+        """|Δ mask precision| ≤ 0.01 on the segmentation scenario."""
+        scenario = _build_segmentation_scenario()
+        legacy = _run_legacy_segm(scenario)
+        new = _run_callback_segm(scenario)
+
+        delta = abs(legacy["precision"] - new["val/precision"])
+        assert delta <= _F1_TOL, (
+            f"Segm precision parity failed: legacy={legacy['precision']:.4f}, "
+            f"new={new['val/precision']:.4f}, delta={delta:.4f} > {_F1_TOL}"
+        )
+
+    def test_segm_recall_within_tolerance(self) -> None:
+        """|Δ mask recall| ≤ 0.01 on the segmentation scenario."""
+        scenario = _build_segmentation_scenario()
+        legacy = _run_legacy_segm(scenario)
+        new = _run_callback_segm(scenario)
+
+        delta = abs(legacy["recall"] - new["val/recall"])
+        assert delta <= _F1_TOL, (
+            f"Segm recall parity failed: legacy={legacy['recall']:.4f}, "
+            f"new={new['val/recall']:.4f}, delta={delta:.4f} > {_F1_TOL}"
+        )

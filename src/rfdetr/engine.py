@@ -24,6 +24,7 @@ from typing import Iterable
 
 import torch
 import torch.nn.functional as F
+from torchvision.ops import box_iou
 from tqdm.auto import tqdm
 
 import rfdetr.util.misc as utils
@@ -492,8 +493,6 @@ def _match_single_class(
     pred_sorted = pred_items[sort_idx]
 
     if iou_type == "bbox":
-        from torchvision.ops import box_iou
-
         iou_matrix = box_iou(pred_sorted, gt_items)  # [N, M]
     else:
         iou_matrix = _compute_mask_iou(pred_sorted, gt_items)  # [N, M]
