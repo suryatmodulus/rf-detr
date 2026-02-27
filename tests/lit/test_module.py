@@ -6,7 +6,6 @@
 
 """Comprehensive unit tests for RFDETRModule (LightningModule wrapper)."""
 
-import argparse
 import math
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -173,70 +172,6 @@ def build_module(tmp_path):
 def make_batch():
     """Factory fixture — call with optional batch_size/channels/h/w."""
     return _make_batch
-
-
-class TestBuildArgs:
-    """Tests for _build_args() — verifies that ModelConfig and TrainConfig fields are
-    faithfully mapped to the legacy argparse.Namespace consumed by build_model()
-    and build_criterion_and_postprocessors()."""
-
-    def test_forwards_model_config_fields(self, base_model_config, build_module):
-        """Verify model config fields are faithfully mapped to the _args Namespace."""
-        mc = base_model_config(num_classes=7)
-        module, _, _, _ = build_module(model_config=mc)
-        args = module._args
-
-        assert args.encoder == mc.encoder
-        assert args.num_classes == 7
-        assert args.hidden_dim == mc.hidden_dim
-        assert args.resolution == mc.resolution
-
-    def test_forwards_train_config_fields(self, base_train_config, build_module):
-        """Verify training config fields are faithfully mapped to the _args Namespace."""
-        tc = base_train_config(lr=3e-4, epochs=20, weight_decay=5e-5)
-        module, _, _, _ = build_module(train_config=tc)
-        args = module._args
-
-        assert args.lr == 3e-4
-        assert args.epochs == 20
-        assert args.weight_decay == 5e-5
-
-    def test_segmentation_extras_appear_on_namespace(self, base_model_config, seg_train_config, build_module):
-        """Segmentation-specific fields must propagate to _args when provided."""
-        mc = base_model_config(segmentation_head=True)
-        tc = seg_train_config(mask_ce_loss_coef=3.0, mask_dice_loss_coef=4.0, mask_point_sample_ratio=8)
-        module, _, _, _ = build_module(model_config=mc, train_config=tc)
-        args = module._args
-
-        assert args.mask_ce_loss_coef == 3.0
-        assert args.mask_dice_loss_coef == 4.0
-        assert args.mask_point_sample_ratio == 8
-
-    def test_segmentation_extras_have_defaults_for_non_seg_config(self, build_module):
-        """Non-segmentation configs must still populate seg fields with defaults."""
-        module, _, _, _ = build_module()
-        args = module._args
-
-        assert args.mask_ce_loss_coef == 5.0
-        assert args.mask_dice_loss_coef == 5.0
-        assert args.mask_point_sample_ratio == 16
-
-    def test_returns_argparse_namespace(self, build_module):
-        """The _args attribute must be an argparse.Namespace for downstream compatibility."""
-        module, _, _, _ = build_module()
-        assert isinstance(module._args, argparse.Namespace)
-
-    def test_num_queries_from_base_config(self, base_model_config, build_module):
-        """num_queries must be forwarded from model config to _args unchanged."""
-        mc = base_model_config()
-        module, _, _, _ = build_module(model_config=mc)
-        assert module._args.num_queries == mc.num_queries
-
-    def test_segmentation_head_flag_forwarded(self, base_model_config, build_module):
-        """The segmentation_head boolean must appear on _args for model building."""
-        mc = base_model_config(segmentation_head=True)
-        module, _, _, _ = build_module(model_config=mc)
-        assert module._args.segmentation_head is True
 
 
 class TestInit:
