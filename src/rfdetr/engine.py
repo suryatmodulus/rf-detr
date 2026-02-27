@@ -285,66 +285,88 @@ def sweep_confidence_thresholds(per_class_data, conf_thresholds, classes_with_gt
     return results
 
 
-def coco_extended_metrics(coco_eval):
-    """
-    Compute precision/recall by sweeping confidence thresholds to maximize macro-F1.
-    Uses evalImgs directly to compute metrics from raw matching data.
-    """
+def _matching_data_from_coco_eval(coco_eval: Any) -> dict[int, dict[str, Any]]:
+    """Bridge: extract per-class matching data from a COCOeval object.
 
-    iou50_idx = np.argmax(np.isclose(coco_eval.params.iouThrs, 0.50)).item()
-    cat_ids = coco_eval.params.catIds
-    num_classes = len(cat_ids)
-    area_idx = 0
-    maxdet_idx = 2
+    Converts the flat ``coco_eval.evalImgs`` list into the compact
+    ``{class_id: {scores, matches, ignore, total_gt}}`` format produced by
+    :func:`build_matching_data`, making legacy evaluator output compatible with
+    :func:`sweep_confidence_thresholds` and :func:`merge_matching_data`.
 
-    # Unflatten evalImgs into a nested dict
-    evalImgs_unflat = {}
+    Only the "all" area range and IoU threshold 0.50 are used, matching the
+    convention in :func:`coco_extended_metrics`.
+
+    Args:
+        coco_eval: A :class:`pycocotools.cocoeval.COCOeval` instance after
+            ``evaluate()`` and ``accumulate()`` have been called.
+
+    Returns:
+        Mapping from integer category ID to per-class matching data dict with
+        keys ``"scores"``, ``"matches"``, ``"ignore"`` (numpy arrays) and
+        ``"total_gt"`` (int).
+    """
+    iou50_idx = int(np.argmax(np.isclose(coco_eval.params.iouThrs, 0.50)))
+    cat_ids: list[int] = coco_eval.params.catIds
+    area_rng_all = tuple(coco_eval.params.areaRng[0])
+
+    # Unflatten flat evalImgs list → {cat_id: {area_rng: {img_id: entry}}}
+    evalImgs_unflat: dict[int, dict] = {}
     for e in coco_eval.evalImgs:
         if e is None:
             continue
-        cat_id = e["category_id"]
-        area_rng = tuple(e["aRng"])
-        img_id = e["image_id"]
+        cid = e["category_id"]
+        evalImgs_unflat.setdefault(cid, {}).setdefault(tuple(e["aRng"]), {})[e["image_id"]] = e
 
-        if cat_id not in evalImgs_unflat:
-            evalImgs_unflat[cat_id] = {}
-        if area_rng not in evalImgs_unflat[cat_id]:
-            evalImgs_unflat[cat_id][area_rng] = {}
-        evalImgs_unflat[cat_id][area_rng][img_id] = e
-
-    area_rng_all = tuple(coco_eval.params.areaRng[area_idx])
-
-    per_class_data = []
+    result: dict[int, dict[str, Any]] = {}
     for cid in cat_ids:
-        dt_scores = []
-        dt_matches = []
-        dt_ignore = []
+        dt_scores: list[float] = []
+        dt_matches: list[float] = []
+        dt_ignore: list[bool] = []
         total_gt = 0
 
         for img_id in coco_eval.params.imgIds:
             e = evalImgs_unflat.get(cid, {}).get(area_rng_all, {}).get(img_id)
             if e is None:
                 continue
-
-            num_dt = len(e["dtIds"])
-            # num_gt = len(e['gtIds'])
-
-            gt_ignore = e["gtIgnore"]
-            total_gt += sum(1 for ig in gt_ignore if not ig)
-
-            for d in range(num_dt):
+            total_gt += sum(1 for ig in e["gtIgnore"] if not ig)
+            for d in range(len(e["dtIds"])):
                 dt_scores.append(e["dtScores"][d])
                 dt_matches.append(e["dtMatches"][iou50_idx, d])
-                dt_ignore.append(e["dtIgnore"][iou50_idx, d])
+                dt_ignore.append(bool(e["dtIgnore"][iou50_idx, d]))
 
-        per_class_data.append(
-            {
-                "scores": np.array(dt_scores),
-                "matches": np.array(dt_matches),
-                "ignore": np.array(dt_ignore, dtype=bool),
-                "total_gt": total_gt,
-            }
-        )
+        result[cid] = {
+            "scores": np.array(dt_scores, dtype=float),
+            "matches": np.array(dt_matches),
+            "ignore": np.array(dt_ignore, dtype=bool),
+            "total_gt": total_gt,
+        }
+    return result
+
+
+def coco_extended_metrics(coco_eval: Any) -> dict[str, Any]:
+    """Compute precision/recall by sweeping confidence thresholds to maximise macro-F1.
+
+    Compatibility wrapper kept for the migration period.  Internally delegates
+    to :func:`_matching_data_from_coco_eval` and
+    :func:`sweep_confidence_thresholds`; does not access
+    ``COCOeval.evalImgs`` directly.
+
+    Args:
+        coco_eval: A :class:`pycocotools.cocoeval.COCOeval` instance after
+            ``evaluate()`` and ``accumulate()`` have been called.
+
+    Returns:
+        Dict with keys ``"class_map"`` (list of per-class metric dicts),
+        ``"map"`` (mAP@50), ``"precision"``, ``"recall"``, ``"f1_score"``.
+    """
+    cat_ids: list[int] = coco_eval.params.catIds
+    num_classes = len(cat_ids)
+    area_idx = 0
+    maxdet_idx = 2
+    iou50_idx = int(np.argmax(np.isclose(coco_eval.params.iouThrs, 0.50)))
+
+    class_matching = _matching_data_from_coco_eval(coco_eval)
+    per_class_data = [class_matching[cid] for cid in cat_ids]
 
     conf_thresholds = np.linspace(0.0, 1.0, 101)
     classes_with_gt = [k for k in range(num_classes) if per_class_data[k]["total_gt"] > 0]
@@ -364,9 +386,8 @@ def coco_extended_metrics(coco_eval):
         # [T, R]
         p_masked = np.where(p_slice > -1, p_slice, np.nan)
 
-        # We do this as two sequential nanmeans to avoid
-        # underweighting columns with more nans, since each
-        # column corresponds to a different IoU threshold
+        # Two sequential nanmeans to avoid underweighting columns with more nans,
+        # since each column corresponds to a different IoU threshold
         # [T, R] -> [T]
         ap_per_iou = np.nanmean(p_masked, axis=1)
 
