@@ -115,9 +115,7 @@ class TestRFDETRTrainShim:
             RFDETR.train(mock_self)
 
         trainer = mock_bt.return_value
-        trainer.fit.assert_called_once_with(
-            _mcls.return_value, _dmcls.return_value, ckpt_path=None
-        )
+        trainer.fit.assert_called_once_with(_mcls.return_value, _dmcls.return_value, ckpt_path=None)
 
     def test_ckpt_path_forwarded_when_resume_set(self, tmp_path):
         """trainer.fit receives ckpt_path when config.resume is a path string."""
@@ -127,9 +125,7 @@ class TestRFDETRTrainShim:
             RFDETR.train(mock_self)
 
         trainer = mock_bt.return_value
-        trainer.fit.assert_called_once_with(
-            _mcls.return_value, _dmcls.return_value, ckpt_path="/some/checkpoint.ckpt"
-        )
+        trainer.fit.assert_called_once_with(_mcls.return_value, _dmcls.return_value, ckpt_path="/some/checkpoint.ckpt")
 
     def test_ckpt_path_none_when_resume_is_empty_string(self, tmp_path):
         """config.resume='' is coerced to ckpt_path=None via `resume or None`."""

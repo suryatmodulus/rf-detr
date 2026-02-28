@@ -120,8 +120,7 @@ class RFDETR:
         callbacks_dict = kwargs.pop("callbacks", None)
         if callbacks_dict and any(callbacks_dict.values()):
             warnings.warn(
-                "Custom callbacks dict is not forwarded to PTL. "
-                "Use PTL Callback objects instead.",
+                "Custom callbacks dict is not forwarded to PTL. Use PTL Callback objects instead.",
                 DeprecationWarning,
                 stacklevel=2,
             )
