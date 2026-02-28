@@ -5,3 +5,7 @@
 # ------------------------------------------------------------------------
 
 """Lightning callbacks for RF-DETR training (Phase 3+)."""
+
+from rfdetr.lit.callbacks.ema import RFDETREMACallback
+
+__all__ = ["RFDETREMACallback"]
