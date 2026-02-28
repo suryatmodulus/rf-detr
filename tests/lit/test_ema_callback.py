@@ -74,9 +74,7 @@ class TestModelEmaParity:
         cb = RFDETREMACallback(decay=decay, tau=tau)
 
         # Initialise manual EMA state from model (same as ModelEma deepcopy)
-        ema_weights: dict[str, torch.Tensor] = {
-            name: p.clone() for name, p in model.named_parameters()
-        }
+        ema_weights: dict[str, torch.Tensor] = {name: p.clone() for name, p in model.named_parameters()}
 
         for step in range(n_steps):
             # Perturb model parameters
@@ -88,20 +86,15 @@ class TestModelEmaParity:
             model_ema.update(model)
 
             # Replicate update via callback avg_fn
-            model_weights = {
-                name: p.clone() for name, p in model.named_parameters()
-            }
+            model_weights = {name: p.clone() for name, p in model.named_parameters()}
             for name in ema_weights:
-                ema_weights[name] = cb._avg_fn(
-                    ema_weights[name], model_weights[name], step
-                )
+                ema_weights[name] = cb._avg_fn(ema_weights[name], model_weights[name], step)
 
         # Compare
         legacy_state = dict(model_ema.module.named_parameters())
         for name, cb_val in ema_weights.items():
             assert torch.allclose(cb_val, legacy_state[name], atol=1e-5), (
-                f"Parity failed for {name}: "
-                f"max diff = {(cb_val - legacy_state[name]).abs().max().item()}"
+                f"Parity failed for {name}: max diff = {(cb_val - legacy_state[name]).abs().max().item()}"
             )
 
 
