@@ -445,6 +445,25 @@ class TestConvertLegacyCheckpoint:
         # EMA stashed
         assert hasattr(fake, "_pending_legacy_ema_state")
 
+    def test_missing_model_key_raises_value_error(self, tmp_path):
+        """Source file with no 'model' key raises ValueError with a clear message."""
+        path = str(tmp_path / "no_model.pth")
+        torch.save({"epoch": 5}, path)
+        dst = str(tmp_path / "out.ckpt")
+
+        with pytest.raises(ValueError, match="'model' key"):
+            convert_legacy_checkpoint(path, dst)
+
+    def test_args_primitive_type_falls_back_to_empty_dict(self, tmp_path):
+        """args of a non-dict, non-Namespace type (e.g. string) falls back to {} with a warning."""
+        path = str(tmp_path / "prim_args.pth")
+        torch.save({"model": {"w": torch.zeros(1)}, "args": "legacy_string_value"}, path)
+        dst = str(tmp_path / "out.ckpt")
+
+        convert_legacy_checkpoint(path, dst)
+        ckpt = torch.load(dst, map_location="cpu", weights_only=False)
+        assert ckpt["hyper_parameters"] == {}
+
 
 # ---------------------------------------------------------------------------
 # 3. RFDETRModule.on_load_checkpoint

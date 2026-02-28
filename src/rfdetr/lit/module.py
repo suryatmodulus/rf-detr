@@ -6,9 +6,11 @@
 
 """LightningModule for RF-DETR training and validation (Phase 1)."""
 
+from __future__ import annotations
+
 import math
 import random
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Optional, Tuple
 
 import numpy as np
 import torch
@@ -330,7 +332,7 @@ class RFDETRModule(LightningModule):
         orig_sizes = torch.stack([t["orig_size"] for t in targets])
         return self.postprocess(outputs, orig_sizes)
 
-    def on_load_checkpoint(self, checkpoint: Dict[str, Any]) -> None:
+    def on_load_checkpoint(self, checkpoint: dict[str, Any]) -> None:
         """Auto-detect and normalise legacy ``.pth`` checkpoints at load time.
 
         PTL calls this hook before applying ``checkpoint["state_dict"]`` to
@@ -357,6 +359,8 @@ class RFDETRModule(LightningModule):
             checkpoint["state_dict"] = {"model." + k: v for k, v in checkpoint["model"].items()}
 
         # Stash legacy EMA weights for the EMA callback to restore if active.
+        # TODO(Chapter 6): RFDETREMACallback.on_load_checkpoint consumer not yet implemented;
+        # _pending_legacy_ema_state is intentionally unused until then.
         if "legacy_ema_state_dict" in checkpoint:
             self._pending_legacy_ema_state = checkpoint["legacy_ema_state_dict"]
 
