@@ -16,7 +16,6 @@ import torch
 
 from rfdetr.lit.callbacks.best_model import BestModelCallback, RFDETREarlyStopping
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -53,9 +52,7 @@ def _make_pl_module() -> MagicMock:
 class TestBestModelCallback:
     """Verify best-model checkpoint saving and selection."""
 
-    def test_regular_checkpoint_saved_on_improvement(
-        self, tmp_path: Path
-    ) -> None:
+    def test_regular_checkpoint_saved_on_improvement(self, tmp_path: Path) -> None:
         """Metric 0.5 > initial 0.0 causes checkpoint_best_regular.pth to be saved."""
         cb = BestModelCallback(output_dir=str(tmp_path))
         trainer = _make_trainer({"val/mAP_50_95": 0.5})
@@ -65,9 +62,7 @@ class TestBestModelCallback:
 
         assert (tmp_path / "checkpoint_best_regular.pth").exists()
 
-    def test_regular_checkpoint_not_saved_on_no_improvement(
-        self, tmp_path: Path
-    ) -> None:
+    def test_regular_checkpoint_not_saved_on_no_improvement(self, tmp_path: Path) -> None:
         """Metric 0.3 after best 0.5 does not create a checkpoint file."""
         cb = BestModelCallback(output_dir=str(tmp_path))
         pl_module = _make_pl_module()
@@ -86,17 +81,13 @@ class TestBestModelCallback:
 
         assert path.stat().st_mtime_ns == stat_before
 
-    def test_ema_checkpoint_saved_on_ema_improvement(
-        self, tmp_path: Path
-    ) -> None:
+    def test_ema_checkpoint_saved_on_ema_improvement(self, tmp_path: Path) -> None:
         """When monitor_ema is set and EMA metric improves, EMA checkpoint is saved."""
         cb = BestModelCallback(
             output_dir=str(tmp_path),
             monitor_ema="val/ema_mAP_50_95",
         )
-        trainer = _make_trainer(
-            {"val/mAP_50_95": 0.4, "val/ema_mAP_50_95": 0.6}
-        )
+        trainer = _make_trainer({"val/mAP_50_95": 0.4, "val/ema_mAP_50_95": 0.6})
         pl_module = _make_pl_module()
 
         cb.on_validation_end(trainer, pl_module)
@@ -113,9 +104,7 @@ class TestBestModelCallback:
         pl_module = _make_pl_module()
 
         # Epoch with regular=0.6, ema=0.5
-        trainer = _make_trainer(
-            {"val/mAP_50_95": 0.6, "val/ema_mAP_50_95": 0.5}
-        )
+        trainer = _make_trainer({"val/mAP_50_95": 0.6, "val/ema_mAP_50_95": 0.5})
         cb.on_validation_end(trainer, pl_module)
 
         cb.on_fit_end(trainer, pl_module)
@@ -136,9 +125,7 @@ class TestBestModelCallback:
         pl_module = _make_pl_module()
 
         # Give regular a lower value, EMA a higher value
-        trainer = _make_trainer(
-            {"val/mAP_50_95": 0.5, "val/ema_mAP_50_95": 0.7}
-        )
+        trainer = _make_trainer({"val/mAP_50_95": 0.5, "val/ema_mAP_50_95": 0.7})
         cb.on_validation_end(trainer, pl_module)
 
         cb.on_fit_end(trainer, pl_module)
@@ -165,9 +152,7 @@ class TestBestModelCallback:
         pl_module = _make_pl_module()
 
         # Equal metrics
-        trainer = _make_trainer(
-            {"val/mAP_50_95": 0.6, "val/ema_mAP_50_95": 0.6}
-        )
+        trainer = _make_trainer({"val/mAP_50_95": 0.6, "val/ema_mAP_50_95": 0.6})
         cb.on_validation_end(trainer, pl_module)
 
         cb.on_fit_end(trainer, pl_module)
@@ -212,9 +197,7 @@ class TestBestModelCallback:
         cb.on_validation_end(trainer, pl_module)
         cb.on_fit_end(trainer, pl_module)
 
-        trainer.test.assert_called_once_with(
-            pl_module, datamodule=trainer.datamodule
-        )
+        trainer.test.assert_called_once_with(pl_module, datamodule=trainer.datamodule)
 
     def test_run_test_false_skips_trainer_test(self, tmp_path: Path) -> None:
         """run_test=False means trainer.test() is never called."""
@@ -328,9 +311,7 @@ class TestRFDETREarlyStopping:
         pl_module = _make_pl_module()
 
         # EMA is 0.3 (low), regular is 0.8 (high)
-        trainer = _make_trainer(
-            {"val/mAP_50_95": 0.8, "val/ema_mAP_50_95": 0.3}
-        )
+        trainer = _make_trainer({"val/mAP_50_95": 0.8, "val/ema_mAP_50_95": 0.3})
         cb.on_validation_end(trainer, pl_module)
 
         # best_map should be EMA value, not regular
@@ -341,9 +322,7 @@ class TestRFDETREarlyStopping:
         cb = RFDETREarlyStopping(patience=5, min_delta=0.001, use_ema=False)
         pl_module = _make_pl_module()
 
-        trainer = _make_trainer(
-            {"val/mAP_50_95": 0.4, "val/ema_mAP_50_95": 0.6}
-        )
+        trainer = _make_trainer({"val/mAP_50_95": 0.4, "val/ema_mAP_50_95": 0.6})
         cb.on_validation_end(trainer, pl_module)
 
         # max(0.4, 0.6) = 0.6
@@ -370,3 +349,82 @@ class TestRFDETREarlyStopping:
 
         assert cb._counter == 0
         assert trainer.should_stop is False
+
+    @pytest.mark.parametrize(
+        "use_ema, maps, patience, min_delta",
+        [
+            pytest.param(
+                False,
+                [0.10, 0.20, 0.30, 0.30, 0.30, 0.30, 0.30, 0.30],
+                3,
+                0.01,
+                id="use_ema_false_plateau",
+            ),
+            pytest.param(
+                True,
+                [0.05, 0.15, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25],
+                3,
+                0.01,
+                id="use_ema_true_plateau",
+            ),
+        ],
+    )
+    def test_trigger_epoch_matches_legacy_early_stopping(
+        self,
+        use_ema: bool,
+        maps: list,
+        patience: int,
+        min_delta: float,
+    ) -> None:
+        """RFDETREarlyStopping stops at the same epoch as legacy EarlyStoppingCallback.
+
+        Drives both callbacks with an identical mAP sequence and asserts the
+        trigger epoch is identical, proving behavioural parity.
+        """
+        from rfdetr.util.early_stopping import EarlyStoppingCallback
+
+        # --- Legacy callback ---
+        stop_calls: list[int] = []
+        legacy_model = MagicMock()
+        legacy_model.request_early_stop.side_effect = lambda: stop_calls.append(1)
+        legacy = EarlyStoppingCallback(
+            model=legacy_model,
+            patience=patience,
+            min_delta=min_delta,
+            use_ema=use_ema,
+            verbose=False,
+        )
+        legacy_stop_epoch: int | None = None
+        for epoch, m in enumerate(maps):
+            if use_ema:
+                log_stats = {
+                    "test_coco_eval_bbox": [m],
+                    "ema_test_coco_eval_bbox": [m],
+                }
+            else:
+                log_stats = {"test_coco_eval_bbox": [m]}
+            legacy.update(log_stats)
+            if stop_calls:
+                legacy_stop_epoch = epoch
+                break
+
+        # --- New callback ---
+        new_cb = RFDETREarlyStopping(
+            patience=patience,
+            min_delta=min_delta,
+            use_ema=use_ema,
+            verbose=False,
+        )
+        pl_module = _make_pl_module()
+        new_stop_epoch: int | None = None
+        for epoch, m in enumerate(maps):
+            metrics = {"val/mAP_50_95": m}
+            if use_ema:
+                metrics["val/ema_mAP_50_95"] = m
+            trainer = _make_trainer(metrics, current_epoch=epoch)
+            new_cb.on_validation_end(trainer, pl_module)
+            if trainer.should_stop:
+                new_stop_epoch = epoch
+                break
+
+        assert new_stop_epoch == legacy_stop_epoch

@@ -66,11 +66,7 @@ class BestModelCallback(Callback):
             return
 
         # --- Regular model ---
-        regular_map = (
-            trainer.callback_metrics.get(
-                self._monitor_regular, torch.tensor(0.0)
-            ).item()
-        )
+        regular_map = trainer.callback_metrics.get(self._monitor_regular, torch.tensor(0.0)).item()
         if regular_map > self._best_regular:
             self._best_regular = regular_map
             self._output_dir.mkdir(parents=True, exist_ok=True)
@@ -90,11 +86,7 @@ class BestModelCallback(Callback):
 
         # --- EMA model ---
         if self._monitor_ema is not None:
-            ema_map = (
-                trainer.callback_metrics.get(
-                    self._monitor_ema, torch.tensor(0.0)
-                ).item()
-            )
+            ema_map = trainer.callback_metrics.get(self._monitor_ema, torch.tensor(0.0)).item()
             if ema_map > self._best_ema:
                 self._best_ema = ema_map
                 self._output_dir.mkdir(parents=True, exist_ok=True)
@@ -199,12 +191,8 @@ class RFDETREarlyStopping(Callback):
         regular_tensor = metrics.get(self._monitor_regular, None)
         ema_tensor = metrics.get(self._monitor_ema, None)
 
-        regular_map: Optional[float] = (
-            regular_tensor.item() if regular_tensor is not None else None
-        )
-        ema_map: Optional[float] = (
-            ema_tensor.item() if ema_tensor is not None else None
-        )
+        regular_map: Optional[float] = regular_tensor.item() if regular_tensor is not None else None
+        ema_map: Optional[float] = ema_tensor.item() if ema_tensor is not None else None
 
         # Determine current_map following legacy logic
         current_map: Optional[float] = None
@@ -231,8 +219,7 @@ class RFDETREarlyStopping(Callback):
             self._counter += 1
             if self._verbose:
                 logger.info(
-                    "Early stopping: no improvement for %d/%d epochs "
-                    "(best=%.4f, current=%.4f)",
+                    "Early stopping: no improvement for %d/%d epochs (best=%.4f, current=%.4f)",
                     self._counter,
                     self._patience,
                     self._best_map,
@@ -241,8 +228,7 @@ class RFDETREarlyStopping(Callback):
             if self._counter >= self._patience:
                 if self._verbose:
                     logger.info(
-                        "Early stopping triggered after %d epochs without "
-                        "improvement above min_delta=%.4f",
+                        "Early stopping triggered after %d epochs without improvement above min_delta=%.4f",
                         self._patience,
                         self._min_delta,
                     )
