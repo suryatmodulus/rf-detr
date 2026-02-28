@@ -52,7 +52,7 @@ from rfdetr.util.get_param_dicts import get_param_dict
 from rfdetr.util.logger import get_logger
 from rfdetr.util.misc import get_rank, get_world_size, is_main_process, save_on_master
 from rfdetr.util.utils import BestMetricHolder, ModelEma, clean_state_dict
-from rfdetr.utilities.decorators import _DeprecatedDict
+from rfdetr.utilities.decorators import _DeprecatedDict, deprecated
 
 if str(os.environ.get("USE_FILE_SYSTEM_SHARING", "False")).lower() in ["true", "1"]:
     import torch.multiprocessing
@@ -1023,6 +1023,16 @@ def get_args_parser():
     return parser
 
 
+@deprecated(
+    target=None,
+    deprecated_in="1.5.1",
+    remove_in="2.0.0",
+    template_mgs=(
+        "`%(source_name)s` is deprecated as of v%(deprecated_in)s and will be removed in "
+        "v%(remove_in)s. Use `build_trainer(train_config, model_config)` from `rfdetr.lit` "
+        "instead, or call `RFDETR.train()` which delegates to the PTL stack automatically."
+    ),
+)
 def populate_args(
     # Basic training parameters
     num_classes=2,
