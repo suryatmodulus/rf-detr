@@ -36,7 +36,12 @@ from rfdetr.lit.datamodule import RFDETRDataModule
 from rfdetr.lit.module import RFDETRModule
 
 
-def build_trainer(train_config: "TrainConfig", model_config: "ModelConfig") -> Trainer:  # type: ignore[name-defined]
+def build_trainer(
+    train_config: "TrainConfig",
+    model_config: "ModelConfig",
+    *,
+    accelerator: str = "auto",
+) -> Trainer:  # type: ignore[name-defined]
     """Assemble a PTL ``Trainer`` with the full RF-DETR callback and logger stack.
 
     Resolves training precision from ``model_config.amp`` and device capability,
@@ -50,6 +55,10 @@ def build_trainer(train_config: "TrainConfig", model_config: "ModelConfig") -> T
     Args:
         train_config: Training hyperparameter configuration.
         model_config: Architecture configuration (used for precision and segmentation).
+        accelerator: PTL accelerator string (e.g. ``"auto"``, ``"cpu"``, ``"gpu"``).
+            Defaults to ``"auto"`` so PTL selects the best available device.
+            Pass ``"cpu"`` to override auto-detection (e.g. when the caller
+            explicitly requests CPU training via ``device="cpu"``).
 
     Returns:
         A configured ``pytorch_lightning.Trainer`` instance.
@@ -192,7 +201,7 @@ def build_trainer(train_config: "TrainConfig", model_config: "ModelConfig") -> T
 
     return Trainer(
         max_epochs=tc.epochs,
-        accelerator="auto",
+        accelerator=accelerator,
         devices="auto",
         strategy=strategy,
         precision=_resolve_precision(),

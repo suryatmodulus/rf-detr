@@ -684,6 +684,70 @@ class TestValidationStep:
         assert len(val_loss_calls) == 1
 
 
+class TestTestStep:
+    """Tests for test_step() — verifies output dict shape, postprocessor
+    invocation with correct original sizes, and test/loss logging.
+
+    Mirrors :class:`TestValidationStep` since both steps share the same
+    forward+postprocess logic and differ only in the logged metric prefix.
+    """
+
+    def _run_test_step(self, tmp_path):
+        module, fake_model, fake_criterion, fake_pp = _build_module(tmp_path=tmp_path)
+        samples, targets = _make_batch()
+        fake_model.return_value = {}
+        fake_criterion.return_value = {"loss_ce": torch.tensor(0.5)}
+        fake_criterion.weight_dict = {"loss_ce": 1.0}
+        module.log = MagicMock()
+        result = module.test_step((samples, targets), batch_idx=0)
+        return result, fake_pp, module
+
+    @pytest.mark.parametrize(
+        "key",
+        [
+            pytest.param("results", id="results-key"),
+            pytest.param("targets", id="targets-key"),
+        ],
+    )
+    def test_returns_dict_with_required_key(self, key, tmp_path):
+        """Output dict must contain both 'results' and 'targets' for COCOEvalCallback."""
+        result, _, _ = self._run_test_step(tmp_path)
+        assert key in result
+
+    def test_postprocess_called_with_orig_sizes(self, tmp_path):
+        """Postprocessor must receive original image sizes to rescale predictions."""
+        result, fake_pp, _ = self._run_test_step(tmp_path)
+        fake_pp.assert_called_once()
+        orig_sizes = fake_pp.call_args[0][1]
+        assert orig_sizes.shape == (2, 2)
+
+    def test_logs_test_loss(self, tmp_path):
+        """Test loss must be logged under test/ prefix for monitoring."""
+        _, _, module = self._run_test_step(tmp_path)
+        test_loss_calls = [c for c in module.log.call_args_list if c[0][0] == "test/loss"]
+        assert len(test_loss_calls) == 1
+
+    def test_model_called_with_samples_only(self, tmp_path):
+        """Test step must pass only samples (not targets) to the model forward."""
+        module, fake_model, fake_criterion, _ = _build_module(tmp_path=tmp_path)
+        samples, targets = _make_batch()
+        fake_model.return_value = {}
+        fake_criterion.return_value = {"loss_ce": torch.tensor(0.5)}
+        fake_criterion.weight_dict = {"loss_ce": 1.0}
+        module.log = MagicMock()
+
+        module.test_step((samples, targets), batch_idx=0)
+
+        fake_model.assert_called_once_with(samples)
+
+    def test_loss_prefix_differs_from_validation(self, tmp_path):
+        """test_step must log 'test/loss', not 'val/loss', to keep metric namespaces separate."""
+        _, _, module = self._run_test_step(tmp_path)
+        logged_keys = [c[0][0] for c in module.log.call_args_list]
+        assert "test/loss" in logged_keys
+        assert "val/loss" not in logged_keys
+
+
 class TestConfigureOptimizers:
     """Tests for configure_optimizers() — covers required output keys, AdamW optimizer
     type, step-interval scheduler, LR lambda warmup ramp, and step-decay behaviour

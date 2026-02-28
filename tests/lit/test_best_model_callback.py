@@ -189,15 +189,71 @@ class TestBestModelCallback:
         assert "args" in data
 
     def test_run_test_true_calls_trainer_test(self, tmp_path: Path) -> None:
-        """run_test=True causes trainer.test() to be called in on_fit_end."""
+        """run_test=True causes trainer.test() when module defines test_step()."""
+        from pytorch_lightning import LightningModule
+
+        class _ModuleWithTestStep(LightningModule):
+            def test_step(self, batch: object, batch_idx: int) -> None:  # noqa: D102
+                ...
+
+        # Use a real subclass (not MagicMock) so type() inspection sees test_step.
+        pl_module = _ModuleWithTestStep()
+        pl_module.model = MagicMock()
+        pl_module.model.state_dict.return_value = {"w": torch.zeros(1)}
+        pl_module.train_config = {"lr": 0.001}
+
         cb = BestModelCallback(output_dir=str(tmp_path), run_test=True)
-        pl_module = _make_pl_module()
         trainer = _make_trainer({"val/mAP_50_95": 0.5})
 
         cb.on_validation_end(trainer, pl_module)
         cb.on_fit_end(trainer, pl_module)
 
         trainer.test.assert_called_once_with(pl_module, datamodule=trainer.datamodule)
+
+    def test_run_test_true_without_test_step_skips_trainer_test(self, tmp_path: Path) -> None:
+        """run_test=True but no test_step override — trainer.test() is NOT called.
+
+        The guard in BestModelCallback.on_fit_end() skips trainer.test() for
+        modules that do not override LightningModule.test_step() to avoid a
+        MisconfigurationException from PTL.
+        """
+        cb = BestModelCallback(output_dir=str(tmp_path), run_test=True)
+        pl_module = _make_pl_module()  # MagicMock — no test_step on its class
+        trainer = _make_trainer({"val/mAP_50_95": 0.5})
+
+        cb.on_validation_end(trainer, pl_module)
+        cb.on_fit_end(trainer, pl_module)
+
+        trainer.test.assert_not_called()
+
+    def test_run_test_loads_best_weights_before_test(self, tmp_path: Path) -> None:
+        """on_fit_end loads checkpoint_best_total.pth weights before trainer.test().
+
+        Mirrors legacy main.py:602-609 which loads the best checkpoint into the
+        model before running test evaluation so the test loop measures the best
+        model, not the end-of-training state.
+        """
+        from pytorch_lightning import LightningModule
+
+        class _ModuleWithTestStep(LightningModule):
+            def test_step(self, batch: object, batch_idx: int) -> None:  # noqa: D102
+                ...
+
+        pl_module = _ModuleWithTestStep()
+        pl_module.model = MagicMock()
+        pl_module.model.state_dict.return_value = {"w": torch.zeros(1)}
+        pl_module.train_config = {"lr": 0.001}
+
+        cb = BestModelCallback(output_dir=str(tmp_path), run_test=True)
+        trainer = _make_trainer({"val/mAP_50_95": 0.5})
+
+        cb.on_validation_end(trainer, pl_module)
+        cb.on_fit_end(trainer, pl_module)
+
+        # Model weights must be loaded from checkpoint_best_total.pth with strict=True
+        pl_module.model.load_state_dict.assert_called_once()
+        call_kwargs = pl_module.model.load_state_dict.call_args.kwargs
+        assert call_kwargs.get("strict") is True, "load_state_dict must be called with strict=True"
 
     def test_run_test_false_skips_trainer_test(self, tmp_path: Path) -> None:
         """run_test=False means trainer.test() is never called."""

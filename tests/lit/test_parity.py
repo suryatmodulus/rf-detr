@@ -777,3 +777,136 @@ class TestF1ParitySegmentation:
             f"Segm {legacy_key} parity failed: legacy={legacy[legacy_key]:.4f}, "
             f"new={new[new_key]:.4f}, delta={delta:.4f} > {_F1_TOL}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Test-loop callback path runner
+# ---------------------------------------------------------------------------
+
+
+def _run_callback_test(scenario: dict) -> dict:
+    """Drive :class:`COCOEvalCallback` via the *test-loop* hooks and return logged metrics.
+
+    Identical data pipeline to :func:`_run_callback`; only the PTL hook names
+    differ (``on_test_batch_end`` / ``on_test_epoch_end``) and the metric
+    prefix is ``test/`` instead of ``val/``.
+
+    Args:
+        scenario: Raw scenario dict from :func:`_build_intermediate_scenario`.
+
+    Returns:
+        Dict mapping metric key (e.g. ``"test/mAP_50"``) to float value.
+    """
+    W = scenario["image_width"]
+    H = scenario["image_height"]
+
+    pred_boxes_xyxy: list[list[float]] = []
+    pred_scores_list: list[float] = []
+    pred_labels_list: list[int] = []
+    for cat_id, box, score in scenario["pred_abs_xywh"]:
+        x, y, w, h = box
+        pred_boxes_xyxy.append([x, y, x + w, y + h])
+        pred_scores_list.append(score)
+        pred_labels_list.append(cat_id)
+
+    preds = [
+        {
+            "boxes": torch.tensor(pred_boxes_xyxy, dtype=torch.float32),
+            "scores": torch.tensor(pred_scores_list, dtype=torch.float32),
+            "labels": torch.tensor(pred_labels_list, dtype=torch.long),
+        }
+    ]
+
+    gt_boxes_norm: list[list[float]] = []
+    gt_labels_list: list[int] = []
+    for cat_id, box in scenario["gt_abs_xywh"]:
+        x, y, w, h = box
+        gt_boxes_norm.append([(x + w / 2) / W, (y + h / 2) / H, w / W, h / H])
+        gt_labels_list.append(cat_id)
+
+    targets = [
+        {
+            "boxes": torch.tensor(gt_boxes_norm, dtype=torch.float32),
+            "labels": torch.tensor(gt_labels_list, dtype=torch.long),
+            "orig_size": torch.tensor([H, W]),
+        }
+    ]
+
+    cb = COCOEvalCallback(max_dets=500)
+    trainer = MagicMock()
+    module = MagicMock()
+    logged: dict[str, float] = {}
+    module.log.side_effect = lambda key, val: logged.__setitem__(key, float(val))
+
+    cb.setup(trainer, module, stage="test")
+    cb.on_test_batch_end(trainer, module, {"results": preds, "targets": targets}, None, 0)
+    cb.on_test_epoch_end(trainer, module)
+
+    return logged
+
+
+# ---------------------------------------------------------------------------
+# Module-scoped fixture — test vs val path on identical data
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def detection_test_vs_val_parity():
+    """``(val_logged, test_logged)`` for the intermediate detection scenario.
+
+    Runs both :func:`_run_callback` and :func:`_run_callback_test` on the same
+    data once for the module; all test-vs-val parity tests share the result.
+    """
+    scenario = _build_intermediate_scenario()
+    return _run_callback(scenario), _run_callback_test(scenario)
+
+
+# ---------------------------------------------------------------------------
+# Parity tests — test loop vs val loop (same data, same algorithm)
+# ---------------------------------------------------------------------------
+
+
+class TestTestVsValParity:
+    """Test-loop metrics must agree with val-loop metrics on identical data.
+
+    Both loops share the same underlying computation
+    (``MeanAveragePrecision`` + ``sweep_confidence_thresholds``); the only
+    difference is the logged key prefix.  Running them on identical data
+    verifies prefix routing correctness and that no extra state or logic
+    diverges between the two paths.
+
+    Tolerance: exact match (same algorithm, same data, deterministic
+    computation), with a small floating-point tolerance of ``1e-6``.
+    """
+
+    @pytest.mark.parametrize(
+        "val_key, test_key",
+        [
+            pytest.param("val/mAP_50", "test/mAP_50", id="mAP50"),
+            pytest.param("val/mAP_75", "test/mAP_75", id="mAP75"),
+            pytest.param("val/mAR", "test/mAR", id="mAR"),
+            pytest.param("val/F1", "test/F1", id="F1"),
+            pytest.param("val/precision", "test/precision", id="precision"),
+            pytest.param("val/recall", "test/recall", id="recall"),
+        ],
+    )
+    def test_metric_identical_in_test_and_val(self, detection_test_vs_val_parity, val_key, test_key) -> None:
+        """Test-loop metric must match val-loop metric exactly on identical data."""
+        val_logged, test_logged = detection_test_vs_val_parity
+        assert test_key in test_logged, f"Expected {test_key!r} in test logged keys: {list(test_logged)}"
+        assert val_key in val_logged, f"Expected {val_key!r} in val logged keys: {list(val_logged)}"
+        assert test_logged[test_key] == pytest.approx(val_logged[val_key], abs=1e-6), (
+            f"{test_key}={test_logged[test_key]:.6f} != {val_key}={val_logged[val_key]:.6f}"
+        )
+
+    def test_test_prefix_logged_not_val(self, detection_test_vs_val_parity) -> None:
+        """Test-loop must emit test/ keys, not val/ keys."""
+        _, test_logged = detection_test_vs_val_parity
+        val_bleed = [k for k in test_logged if k.startswith("val/")]
+        assert not val_bleed, f"Found val/ keys in test loop: {val_bleed}"
+
+    def test_val_prefix_logged_not_test(self, detection_test_vs_val_parity) -> None:
+        """Val-loop must emit val/ keys, not test/ keys."""
+        val_logged, _ = detection_test_vs_val_parity
+        test_bleed = [k for k in val_logged if k.startswith("test/")]
+        assert not test_bleed, f"Found test/ keys in val loop: {test_bleed}"

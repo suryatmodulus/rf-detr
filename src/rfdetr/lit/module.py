@@ -315,6 +315,31 @@ class RFDETRModule(LightningModule):
             "lr_scheduler": {"scheduler": scheduler, "interval": "step"},
         }
 
+    def test_step(self, batch: Tuple, batch_idx: int) -> Dict[str, Any]:
+        """Run forward pass and postprocess for one test step.
+
+        Mirrors :meth:`validation_step` so ``COCOEvalCallback`` can accumulate
+        results via ``on_test_batch_end`` when ``trainer.test()`` is called (e.g.
+        from :class:`~rfdetr.lit.callbacks.BestModelCallback` at end of training).
+
+        Args:
+            batch: Tuple of (NestedTensor samples, list of target dicts).
+            batch_idx: Batch index within the test epoch.
+
+        Returns:
+            Dict with ``results`` (postprocessed predictions) and ``targets``.
+        """
+        samples, targets = batch
+        outputs = self.model(samples)
+        loss_dict = self.criterion(outputs, targets)
+        weight_dict = self.criterion.weight_dict
+        loss = sum(loss_dict[k] * weight_dict[k] for k in loss_dict if k in weight_dict)
+        self.log("test/loss", loss, sync_dist=True)
+
+        orig_sizes = torch.stack([t["orig_size"] for t in targets])
+        results = self.postprocess(outputs, orig_sizes)
+        return {"results": results, "targets": targets}
+
     def predict_step(self, batch: Tuple, batch_idx: int, dataloader_idx: int = 0) -> Any:
         """Run inference on a preprocessed batch and return postprocessed results.
 

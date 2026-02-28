@@ -137,7 +137,17 @@ class BestModelCallback(Callback):
             )
 
         if self._run_test:
-            trainer.test(pl_module, datamodule=trainer.datamodule)
+            # Only call trainer.test() when the module actually defines test_step().
+            cls_test_step = getattr(type(pl_module), "test_step", None)
+            has_test_step = cls_test_step is not None and cls_test_step is not LightningModule.test_step
+            if has_test_step:
+                # Load best weights before test — mirrors legacy main.py:602-609.
+                # trainer.test() evaluates the *best* model, not the end-of-training state.
+                if total_path.exists():
+                    ckpt = torch.load(total_path, map_location="cpu", weights_only=False)
+                    pl_module.model.load_state_dict(ckpt["model"], strict=True)
+                    logger.info("Loaded best weights from %s for test evaluation.", total_path)
+                trainer.test(pl_module, datamodule=trainer.datamodule)
 
 
 class RFDETREarlyStopping(Callback):

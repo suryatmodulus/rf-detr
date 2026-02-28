@@ -125,8 +125,28 @@ class RFDETR:
                 stacklevel=2,
             )
 
-        # Absorb legacy `device` kwarg — PTL selects the accelerator automatically.
-        kwargs.pop("device", None)
+        # Absorb legacy `device` kwarg.  When the caller explicitly requests CPU
+        # (e.g. in tests or CPU-only environments), honour it by forwarding it as
+        # the PTL accelerator.  All other device strings (cuda, mps) are ignored
+        # so PTL can auto-select the best available device.
+        #
+        # FIXME(Chapter 6): the correct fix is to promote `device` to a proper
+        # `TrainConfig.accelerator` field (see Decision #11 / risk table row 4
+        # in MIGRATION_PT_LIGHTNING.md).  The current workaround only handles
+        # the `"cpu"` case and silently drops `"cuda"` / `"mps"` — PTL's
+        # `accelerator="auto"` picks the right hardware for those anyway, but
+        # explicit overrides (e.g. `device="mps"` on a CUDA machine) are lost.
+        _device = kwargs.pop("device", None)
+        _accelerator = "cpu" if _device == "cpu" else "auto"
+
+        # Absorb legacy `start_epoch` — PTL resumes automatically via ckpt_path.
+        if "start_epoch" in kwargs:
+            warnings.warn(
+                "`start_epoch` is deprecated and ignored; PTL resumes automatically via `resume`.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            kwargs.pop("start_epoch")
 
         # Pop `do_benchmark`; benchmarking via `.train()` is deprecated.
         run_benchmark = bool(kwargs.pop("do_benchmark", False))
@@ -140,7 +160,7 @@ class RFDETR:
         config = self.get_train_config(**kwargs)
         module = RFDETRModule(self.model_config, config)
         datamodule = RFDETRDataModule(self.model_config, config)
-        trainer = build_trainer(config, self.model_config)
+        trainer = build_trainer(config, self.model_config, accelerator=_accelerator)
         trainer.fit(module, datamodule, ckpt_path=config.resume or None)
 
         # Sync the trained weights back so predict() / export() see the updated model.

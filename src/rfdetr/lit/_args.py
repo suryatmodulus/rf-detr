@@ -85,6 +85,7 @@ def _build_args_from_configs(model_config: ModelConfig, train_config: TrainConfi
         multi_scale=tc.multi_scale,
         expanded_scales=tc.expanded_scales,
         do_random_resize_via_padding=tc.do_random_resize_via_padding,
+        square_resize_div_64=tc.square_resize_div_64,
         num_workers=tc.num_workers,
         dataset_file=tc.dataset_file,
         dataset_dir=tc.dataset_dir,

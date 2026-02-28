@@ -93,7 +93,7 @@ class TestRFDETRTrainShim:
             RFDETR.train(mock_self)
 
         config = mock_self.get_train_config.return_value
-        mock_bt.assert_called_once_with(config, mock_self.model_config)
+        mock_bt.assert_called_once_with(config, mock_self.model_config, accelerator="auto")
 
     def test_trainer_fit_called_with_module_and_datamodule(self, tmp_path):
         """trainer.fit() is called with (module_instance, datamodule_instance)."""

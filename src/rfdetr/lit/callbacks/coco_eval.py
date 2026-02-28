@@ -105,7 +105,7 @@ class COCOEvalCallback(Callback):
             batch: Raw batch (unused here).
             batch_idx: Batch index within the validation epoch.
         """
-        preds: list[dict[str, torch.Tensor]] = outputs["results"]
+        preds: list[dict[str, torch.Tensor]] = self._convert_preds(outputs["results"])
         targets = self._convert_targets(outputs["targets"])
 
         self.map_metric.update(preds, targets)
@@ -163,9 +163,117 @@ class COCOEvalCallback(Callback):
         self.map_metric.reset()
         self._f1_local = init_matching_accumulator()
 
+    def on_test_batch_end(
+        self,
+        trainer: Any,
+        pl_module: Any,
+        outputs: dict[str, Any],
+        batch: Any,
+        batch_idx: int,
+        dataloader_idx: int = 0,
+    ) -> None:
+        """Accumulate predictions and matching data for one test batch.
+
+        Mirrors :meth:`on_validation_batch_end` for the test evaluation loop
+        triggered by ``trainer.test()`` at the end of training.
+
+        Args:
+            trainer: The PTL Trainer.
+            pl_module: The LightningModule.
+            outputs: Return value of ``test_step``.
+            batch: Raw batch (unused here).
+            batch_idx: Batch index within the test epoch.
+            dataloader_idx: Index of the test dataloader (unused here).
+        """
+        preds: list[dict[str, torch.Tensor]] = self._convert_preds(outputs["results"])
+        targets = self._convert_targets(outputs["targets"])
+
+        self.map_metric.update(preds, targets)
+
+        iou_type = "segm" if self._segmentation else "bbox"
+        batch_matching = build_matching_data(preds, targets, iou_threshold=0.5, iou_type=iou_type)
+        merge_matching_data(self._f1_local, batch_matching)
+
+    def on_test_epoch_end(self, trainer: Any, pl_module: Any) -> None:
+        """Compute and log mAP and F1 under ``test/`` prefix at end of test epoch.
+
+        Mirrors :meth:`on_validation_epoch_end` for the test evaluation loop.
+
+        Args:
+            trainer: The PTL Trainer.
+            pl_module: The LightningModule.
+        """
+        metrics = self.map_metric.compute()
+
+        pfx = "bbox_" if self._segmentation else ""
+        mar_key = f"{pfx}mar_{self._max_dets}"
+
+        pl_module.log("test/mAP_50_95", metrics[f"{pfx}map"])
+        pl_module.log("test/mAP_50", metrics[f"{pfx}map_50"])
+        pl_module.log("test/mAP_75", metrics[f"{pfx}map_75"])
+        pl_module.log("test/mAR", metrics[mar_key])
+
+        if self._segmentation:
+            pl_module.log("test/segm_mAP_50_95", metrics["segm_map"])
+            pl_module.log("test/segm_mAP_50", metrics["segm_map_50"])
+
+        pc_key = f"{pfx}map_per_class"
+        if pc_key in metrics and "classes" in metrics:
+            for class_id, ap in zip(metrics["classes"], metrics[pc_key]):
+                idx = int(class_id)
+                name = self._class_names[idx] if idx < len(self._class_names) else str(idx)
+                pl_module.log(f"test/AP/{name}", ap)
+
+        merged = distributed_merge_matching_data(self._f1_local)
+        if merged:
+            sorted_ids = sorted(merged.keys())
+            per_class_list = [merged[cid] for cid in sorted_ids]
+            classes_with_gt = [i for i, cid in enumerate(sorted_ids) if merged[cid]["total_gt"] > 0]
+            f1_results = sweep_confidence_thresholds(per_class_list, np.linspace(0, 1, 101), classes_with_gt)
+            best = max(f1_results, key=lambda x: x["macro_f1"])
+            pl_module.log("test/F1", float(best["macro_f1"]))
+            pl_module.log("test/precision", float(best["macro_precision"]))
+            pl_module.log("test/recall", float(best["macro_recall"]))
+        else:
+            pl_module.log("test/F1", 0.0)
+            pl_module.log("test/precision", 0.0)
+            pl_module.log("test/recall", 0.0)
+
+        self.map_metric.reset()
+        self._f1_local = init_matching_accumulator()
+
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
+
+    def _convert_preds(self, preds: list[dict[str, torch.Tensor]]) -> list[dict[str, torch.Tensor]]:
+        """Normalise prediction dicts from ``PostProcess`` for torchmetrics.
+
+        ``PostProcess.forward`` returns masks with shape ``[K, 1, H, W]``
+        (the extra channel is introduced by ``F.interpolate`` which requires
+        4-D input).  Both ``torchmetrics.MeanAveragePrecision`` and
+        ``engine.build_matching_data`` expect ``[K, H, W]``, so squeeze the
+        channel dim when present.
+
+        TODO(post-migration): audit whether ``PostProcess.forward`` should
+        drop the channel dim itself (returning ``[K, H, W]`` directly), or
+        whether other callers (e.g. ``RFDETR.predict``) rely on the 4-D shape
+        and handle ``.squeeze(1)`` themselves.  See regression fix — Bug 4.
+
+        Args:
+            preds: Raw per-image prediction dicts from ``PostProcess``.
+
+        Returns:
+            Per-image dicts with ``masks`` squeezed to ``[K, H, W]`` when
+            applicable; all other keys are passed through unchanged.
+        """
+        out = []
+        for p in preds:
+            entry = dict(p)
+            if "masks" in entry and entry["masks"].ndim == 4 and entry["masks"].shape[1] == 1:
+                entry["masks"] = entry["masks"].squeeze(1)
+            out.append(entry)
+        return out
 
     def _convert_targets(self, targets: list[dict[str, torch.Tensor]]) -> list[dict[str, torch.Tensor]]:
         """Convert targets from normalised CxCyWH to absolute xyxy boxes.
