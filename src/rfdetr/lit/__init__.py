@@ -30,6 +30,7 @@ from rfdetr.lit.callbacks import (
     RFDETREMACallback,
 )
 from rfdetr.lit.callbacks.coco_eval import COCOEvalCallback
+from rfdetr.lit.checkpoint import convert_legacy_checkpoint
 from rfdetr.lit.cli import RFDETRCli
 from rfdetr.lit.datamodule import RFDETRDataModule
 from rfdetr.lit.module import RFDETRModule
@@ -217,4 +218,5 @@ __all__ = [
     "RFDETREarlyStopping",
     "RFDETRModule",
     "build_trainer",
+    "convert_legacy_checkpoint",
 ]

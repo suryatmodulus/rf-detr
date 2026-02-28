@@ -330,6 +330,38 @@ class RFDETRModule(LightningModule):
         orig_sizes = torch.stack([t["orig_size"] for t in targets])
         return self.postprocess(outputs, orig_sizes)
 
+    def on_load_checkpoint(self, checkpoint: Dict[str, Any]) -> None:
+        """Auto-detect and normalise legacy ``.pth`` checkpoints at load time.
+
+        PTL calls this hook before applying ``checkpoint["state_dict"]`` to
+        the module.  Two legacy formats are handled:
+
+        1. **Raw legacy format** — a ``*.pth`` file loaded directly by
+           ``Trainer`` (e.g. via ``ckpt_path=``).  Recognised by the presence
+           of ``"model"`` without ``"state_dict"``.  The state dict is
+           rewritten in-place with the ``"model."`` prefix so PTL can apply it
+           normally.
+
+        2. **Converted format** — a file produced by
+           :func:`~rfdetr.lit.checkpoint.convert_legacy_checkpoint` that
+           already has ``"state_dict"`` but also carries
+           ``"legacy_ema_state_dict"``.  The EMA weights are stashed on
+           ``self._pending_legacy_ema_state`` for optional restoration by
+           :class:`~rfdetr.lit.callbacks.ema.RFDETREMACallback`.
+
+        Args:
+            checkpoint: Checkpoint dict passed in by PTL (mutated in-place).
+        """
+        # Raw legacy .pth: no "state_dict" key — build it from "model".
+        if "model" in checkpoint and "state_dict" not in checkpoint:
+            checkpoint["state_dict"] = {
+                "model." + k: v for k, v in checkpoint["model"].items()
+            }
+
+        # Stash legacy EMA weights for the EMA callback to restore if active.
+        if "legacy_ema_state_dict" in checkpoint:
+            self._pending_legacy_ema_state = checkpoint["legacy_ema_state_dict"]
+
     def reinitialize_detection_head(self, num_classes: int) -> None:
         """Reinitialize the detection head for a new class count.
 
