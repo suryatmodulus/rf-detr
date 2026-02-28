@@ -50,6 +50,7 @@ dependencies = [
     "roboflow",
     "albumentations>=1.0.0,<2.0.0",
     "lightning>=2.6,<3",
+    "jsonargparse[signatures]>=4.27.7",
     "torchmetrics[detection]>=1.2",
     "pyDeprecate>=0.3,<1"
 ]
