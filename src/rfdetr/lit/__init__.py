@@ -54,10 +54,9 @@ def build_trainer(train_config: "TrainConfig", model_config: "ModelConfig") -> T
     """
     tc = train_config
 
-    # --- Seed ---
-    seed = getattr(tc, "seed", None)
-    if seed is not None:
-        seed_everything(seed, workers=True)
+    # --- Seed (T4-2 promoted seed to TrainConfig) ---
+    if tc.seed is not None:
+        seed_everything(tc.seed, workers=True)
 
     # --- Precision resolution ---
     def _resolve_precision() -> str:
@@ -185,9 +184,9 @@ def build_trainer(train_config: "TrainConfig", model_config: "ModelConfig") -> T
             stacklevel=2,
         )
 
-    # --- Promoted config fields (getattr fallbacks until T4-2 promotes them) ---
-    clip_max_norm: float = getattr(tc, "clip_max_norm", 0.1)
-    sync_bn: bool = getattr(tc, "sync_bn", False)
+    # --- Promoted config fields (T4-2 added these to TrainConfig) ---
+    clip_max_norm: float = tc.clip_max_norm
+    sync_bn: bool = tc.sync_bn
 
     return Trainer(
         max_epochs=tc.epochs,

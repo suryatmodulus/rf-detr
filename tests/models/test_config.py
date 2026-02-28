@@ -18,6 +18,7 @@ from rfdetr.config import (
     RFDETRSegSmallConfig,
     RFDETRSegXLargeConfig,
     SegmentationTrainConfig,
+    TrainConfig,
 )
 from rfdetr.detr import RFDETR
 
@@ -162,3 +163,138 @@ class TestSegmentationNumSelectMerge:
 
         with pytest.raises(ValueError, match="square_resize_div_64"):
             stub.train_from_config(train_config)
+
+
+class TestTrainConfigT42PromotedFields:
+    """T4-2: Promoted fields exist with correct defaults; device field is absent."""
+
+    def _tc(self, tmp_path, **kwargs):
+        defaults = dict(dataset_dir=str(tmp_path), output_dir=str(tmp_path), tensorboard=False)
+        defaults.update(kwargs)
+        return TrainConfig(**defaults)
+
+    # --- device field removed ---
+
+    def test_device_not_in_model_fields(self):
+        """device must not appear in TrainConfig.model_fields (PTL auto-detects accelerator)."""
+        assert "device" not in TrainConfig.model_fields
+
+    def test_device_kwarg_silently_ignored(self, tmp_path):
+        """Passing device= to TrainConfig is silently ignored (extra='ignore'); PTL absorbs it."""
+        # TrainConfig uses Pydantic default extra='ignore', so unknown kwargs don't raise.
+        tc = self._tc(tmp_path, device="cpu")
+        assert not hasattr(tc, "device")  # field not set on the instance
+
+    # --- promoted fields: defaults ---
+
+    def test_clip_max_norm_default(self, tmp_path):
+        """clip_max_norm defaults to 0.1."""
+        assert self._tc(tmp_path).clip_max_norm == pytest.approx(0.1)
+
+    def test_seed_default_is_none(self, tmp_path):
+        """seed defaults to None (no seeding)."""
+        assert self._tc(tmp_path).seed is None
+
+    def test_sync_bn_default_is_false(self, tmp_path):
+        """sync_bn defaults to False."""
+        assert self._tc(tmp_path).sync_bn is False
+
+    def test_fp16_eval_default_is_false(self, tmp_path):
+        """fp16_eval defaults to False."""
+        assert self._tc(tmp_path).fp16_eval is False
+
+    def test_lr_scheduler_default_is_step(self, tmp_path):
+        """lr_scheduler defaults to 'step'."""
+        assert self._tc(tmp_path).lr_scheduler == "step"
+
+    def test_lr_min_factor_default(self, tmp_path):
+        """lr_min_factor defaults to 0.0."""
+        assert self._tc(tmp_path).lr_min_factor == pytest.approx(0.0)
+
+    def test_dont_save_weights_default_is_false(self, tmp_path):
+        """dont_save_weights defaults to False."""
+        assert self._tc(tmp_path).dont_save_weights is False
+
+    # --- promoted fields: accept explicit values ---
+
+    @pytest.mark.parametrize(
+        "field, value",
+        [
+            pytest.param("clip_max_norm", 0.5, id="clip_max_norm"),
+            pytest.param("seed", 42, id="seed"),
+            pytest.param("sync_bn", True, id="sync_bn"),
+            pytest.param("fp16_eval", True, id="fp16_eval"),
+            pytest.param("lr_scheduler", "cosine", id="lr_scheduler_cosine"),
+            pytest.param("lr_min_factor", 0.01, id="lr_min_factor"),
+            pytest.param("dont_save_weights", True, id="dont_save_weights"),
+        ],
+    )
+    def test_promoted_field_accepts_explicit_value(self, tmp_path, field, value):
+        """Each promoted field accepts an explicit value."""
+        tc = self._tc(tmp_path, **{field: value})
+        assert getattr(tc, field) == value
+
+    def test_lr_scheduler_rejects_invalid_value(self, tmp_path):
+        """lr_scheduler must reject values other than 'step' and 'cosine'."""
+        with pytest.raises((ValueError, ValidationError)):
+            self._tc(tmp_path, lr_scheduler="cyclic")
+
+
+class TestBuildTrainerUsesRealFields:
+    """build_trainer() must read clip_max_norm, seed, sync_bn from real TrainConfig fields."""
+
+    def _tc(self, tmp_path, **kwargs):
+        defaults = dict(
+            dataset_dir=str(tmp_path),
+            output_dir=str(tmp_path),
+            tensorboard=False,
+            wandb=False,
+            mlflow=False,
+            clearml=False,
+            use_ema=False,
+        )
+        defaults.update(kwargs)
+        return TrainConfig(**defaults)
+
+    def _mc(self, **kwargs):
+        from rfdetr.config import RFDETRBaseConfig
+
+        defaults = dict(pretrain_weights=None, device="cpu", num_classes=3)
+        defaults.update(kwargs)
+        return RFDETRBaseConfig(**defaults)
+
+    def test_clip_max_norm_forwarded_to_trainer(self, tmp_path):
+        """gradient_clip_val on the Trainer matches TrainConfig.clip_max_norm."""
+        from rfdetr.lit import build_trainer
+
+        trainer = build_trainer(self._tc(tmp_path, clip_max_norm=0.25), self._mc())
+        assert trainer.gradient_clip_val == pytest.approx(0.25)
+
+    def test_seed_forwarded(self, tmp_path):
+        """seed_everything is called with the value from TrainConfig.seed."""
+        import unittest.mock as mock
+
+        from rfdetr.lit import build_trainer, seed_everything
+
+        with mock.patch("rfdetr.lit.seed_everything") as mock_seed:
+            build_trainer(self._tc(tmp_path, seed=99), self._mc())
+        mock_seed.assert_called_once_with(99, workers=True)
+
+    def test_sync_bn_forwarded_to_trainer(self, tmp_path):
+        """sync_batchnorm=True is passed to Trainer when TrainConfig.sync_bn is True."""
+        import unittest.mock as mock
+
+        from rfdetr.lit import build_trainer
+
+        captured_kwargs = {}
+
+        real_trainer_init = __import__("pytorch_lightning").Trainer.__init__
+
+        def _capture_init(self_t, **kwargs):
+            captured_kwargs.update(kwargs)
+            real_trainer_init(self_t, **kwargs)
+
+        with mock.patch("rfdetr.lit.Trainer.__init__", _capture_init):
+            build_trainer(self._tc(tmp_path, sync_bn=True), self._mc())
+
+        assert captured_kwargs.get("sync_batchnorm") is True

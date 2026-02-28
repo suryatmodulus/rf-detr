@@ -284,7 +284,6 @@ class TrainConfig(BaseModel):
     lr: float = 1e-4
     lr_encoder: float = 1.5e-4
     batch_size: int = 4
-    device: Literal["auto", "cpu", "cuda", "mps"] = DEVICE
     grad_accum_steps: int = 4
     epochs: int = 100
     resume: Optional[str] = None
@@ -326,6 +325,15 @@ class TrainConfig(BaseModel):
     segmentation_head: bool = False
     eval_max_dets: int = 500
     aug_config: Optional[Dict[str, Any]] = None
+    # Promoted from populate_args() — PTL migration (T4-2).
+    # device is intentionally absent: PTL auto-detects accelerator via Trainer(accelerator="auto").
+    clip_max_norm: float = 0.1
+    seed: Optional[int] = None
+    sync_bn: bool = False
+    fp16_eval: bool = False
+    lr_scheduler: Literal["step", "cosine"] = "step"
+    lr_min_factor: float = 0.0
+    dont_save_weights: bool = False
 
     @field_validator("dataset_dir", "output_dir", mode="after")
     @classmethod

@@ -359,8 +359,7 @@ class TestBuildTrainerSeed:
         """seed_everything is called when a seed is present on the config."""
         import unittest.mock as mock
 
-        tc = _tc(tmp_path, use_ema=False)
-        tc.__dict__["seed"] = 42  # injected until T4-2 promotes the field
+        tc = _tc(tmp_path, use_ema=False, seed=42)
 
         with mock.patch("rfdetr.lit.seed_everything") as mock_seed:
             build_trainer(tc, _mc())

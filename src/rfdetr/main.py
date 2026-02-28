@@ -188,11 +188,12 @@ class Model:
         logger.info(str(args))
         device = torch.device(args.device)
 
-        # fix the seed for reproducibility
-        seed = args.seed + get_rank()
-        torch.manual_seed(seed)
-        np.random.seed(seed)
-        random.seed(seed)
+        # fix the seed for reproducibility (seed=None means no explicit seeding)
+        if args.seed is not None:
+            seed = args.seed + get_rank()
+            torch.manual_seed(seed)
+            np.random.seed(seed)
+            random.seed(seed)
 
         criterion, postprocess = build_criterion_and_postprocessors(args)
         model = self.model
