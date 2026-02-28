@@ -1,0 +1,372 @@
+# ------------------------------------------------------------------------
+# RF-DETR
+# Copyright (c) 2025 Roboflow. All Rights Reserved.
+# Licensed under the Apache License, Version 2.0 [see LICENSE for details]
+# ------------------------------------------------------------------------
+
+"""Unit tests for :class:`BestModelCallback` and :class:`RFDETREarlyStopping`."""
+
+from __future__ import annotations
+
+from pathlib import Path
+from unittest.mock import MagicMock
+
+import pytest
+import torch
+
+from rfdetr.lit.callbacks.best_model import BestModelCallback, RFDETREarlyStopping
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _make_trainer(
+    metrics: dict[str, float],
+    current_epoch: int = 1,
+    is_global_zero: bool = True,
+) -> MagicMock:
+    """Create a minimal mock Trainer with controllable callback_metrics."""
+    trainer = MagicMock()
+    trainer.callback_metrics = {k: torch.tensor(v) for k, v in metrics.items()}
+    trainer.current_epoch = current_epoch
+    trainer.is_global_zero = is_global_zero
+    trainer.should_stop = False
+    return trainer
+
+
+def _make_pl_module() -> MagicMock:
+    """Create a minimal mock RFDETRModule with state_dict and train_config."""
+    pl_module = MagicMock()
+    pl_module.model.state_dict.return_value = {"w": torch.zeros(1)}
+    # Use a real dict so torch.save can pickle it (MagicMock is not picklable).
+    pl_module.train_config = {"lr": 0.001}
+    return pl_module
+
+
+# ---------------------------------------------------------------------------
+# TestBestModelCallback
+# ---------------------------------------------------------------------------
+
+
+class TestBestModelCallback:
+    """Verify best-model checkpoint saving and selection."""
+
+    def test_regular_checkpoint_saved_on_improvement(
+        self, tmp_path: Path
+    ) -> None:
+        """Metric 0.5 > initial 0.0 causes checkpoint_best_regular.pth to be saved."""
+        cb = BestModelCallback(output_dir=str(tmp_path))
+        trainer = _make_trainer({"val/mAP_50_95": 0.5})
+        pl_module = _make_pl_module()
+
+        cb.on_validation_end(trainer, pl_module)
+
+        assert (tmp_path / "checkpoint_best_regular.pth").exists()
+
+    def test_regular_checkpoint_not_saved_on_no_improvement(
+        self, tmp_path: Path
+    ) -> None:
+        """Metric 0.3 after best 0.5 does not create a checkpoint file."""
+        cb = BestModelCallback(output_dir=str(tmp_path))
+        pl_module = _make_pl_module()
+
+        # First call sets best to 0.5
+        trainer1 = _make_trainer({"val/mAP_50_95": 0.5})
+        cb.on_validation_end(trainer1, pl_module)
+
+        # Record mtime to verify no overwrite
+        path = tmp_path / "checkpoint_best_regular.pth"
+        stat_before = path.stat().st_mtime_ns
+
+        # Second call with worse metric
+        trainer2 = _make_trainer({"val/mAP_50_95": 0.3})
+        cb.on_validation_end(trainer2, pl_module)
+
+        assert path.stat().st_mtime_ns == stat_before
+
+    def test_ema_checkpoint_saved_on_ema_improvement(
+        self, tmp_path: Path
+    ) -> None:
+        """When monitor_ema is set and EMA metric improves, EMA checkpoint is saved."""
+        cb = BestModelCallback(
+            output_dir=str(tmp_path),
+            monitor_ema="val/ema_mAP_50_95",
+        )
+        trainer = _make_trainer(
+            {"val/mAP_50_95": 0.4, "val/ema_mAP_50_95": 0.6}
+        )
+        pl_module = _make_pl_module()
+
+        cb.on_validation_end(trainer, pl_module)
+
+        assert (tmp_path / "checkpoint_best_ema.pth").exists()
+
+    def test_best_total_regular_wins(self, tmp_path: Path) -> None:
+        """Regular model wins when best_regular > best_ema."""
+        cb = BestModelCallback(
+            output_dir=str(tmp_path),
+            monitor_ema="val/ema_mAP_50_95",
+            run_test=False,
+        )
+        pl_module = _make_pl_module()
+
+        # Epoch with regular=0.6, ema=0.5
+        trainer = _make_trainer(
+            {"val/mAP_50_95": 0.6, "val/ema_mAP_50_95": 0.5}
+        )
+        cb.on_validation_end(trainer, pl_module)
+
+        cb.on_fit_end(trainer, pl_module)
+
+        total = tmp_path / "checkpoint_best_total.pth"
+        assert total.exists()
+        data = torch.load(total, map_location="cpu", weights_only=False)
+        assert "model" in data
+        assert "args" in data
+
+    def test_best_total_ema_wins(self, tmp_path: Path) -> None:
+        """EMA wins when best_ema > best_regular (strict >)."""
+        cb = BestModelCallback(
+            output_dir=str(tmp_path),
+            monitor_ema="val/ema_mAP_50_95",
+            run_test=False,
+        )
+        pl_module = _make_pl_module()
+
+        # Give regular a lower value, EMA a higher value
+        trainer = _make_trainer(
+            {"val/mAP_50_95": 0.5, "val/ema_mAP_50_95": 0.7}
+        )
+        cb.on_validation_end(trainer, pl_module)
+
+        cb.on_fit_end(trainer, pl_module)
+
+        total = tmp_path / "checkpoint_best_total.pth"
+        assert total.exists()
+        # The EMA checkpoint should have been the source
+        ema_data = torch.load(
+            tmp_path / "checkpoint_best_ema.pth",
+            map_location="cpu",
+            weights_only=False,
+        )
+        total_data = torch.load(total, map_location="cpu", weights_only=False)
+        # total is stripped so only model + args
+        assert total_data["model"] == ema_data["model"]
+
+    def test_best_total_ema_equal_uses_regular(self, tmp_path: Path) -> None:
+        """When best_ema == best_regular, regular wins (strict > for EMA)."""
+        cb = BestModelCallback(
+            output_dir=str(tmp_path),
+            monitor_ema="val/ema_mAP_50_95",
+            run_test=False,
+        )
+        pl_module = _make_pl_module()
+
+        # Equal metrics
+        trainer = _make_trainer(
+            {"val/mAP_50_95": 0.6, "val/ema_mAP_50_95": 0.6}
+        )
+        cb.on_validation_end(trainer, pl_module)
+
+        cb.on_fit_end(trainer, pl_module)
+
+        total = tmp_path / "checkpoint_best_total.pth"
+        assert total.exists()
+        # Regular should have been chosen since EMA didn't strictly win
+        regular_data = torch.load(
+            tmp_path / "checkpoint_best_regular.pth",
+            map_location="cpu",
+            weights_only=False,
+        )
+        total_data = torch.load(total, map_location="cpu", weights_only=False)
+        assert total_data["model"] == regular_data["model"]
+
+    def test_best_total_stripped_of_optimizer(self, tmp_path: Path) -> None:
+        """checkpoint_best_total.pth must NOT contain optimizer or lr_scheduler keys."""
+        cb = BestModelCallback(
+            output_dir=str(tmp_path),
+            run_test=False,
+        )
+        pl_module = _make_pl_module()
+        trainer = _make_trainer({"val/mAP_50_95": 0.5})
+
+        cb.on_validation_end(trainer, pl_module)
+        cb.on_fit_end(trainer, pl_module)
+
+        total = tmp_path / "checkpoint_best_total.pth"
+        data = torch.load(total, map_location="cpu", weights_only=False)
+        assert "optimizer" not in data
+        assert "lr_scheduler" not in data
+        # Must contain model and args
+        assert "model" in data
+        assert "args" in data
+
+    def test_run_test_true_calls_trainer_test(self, tmp_path: Path) -> None:
+        """run_test=True causes trainer.test() to be called in on_fit_end."""
+        cb = BestModelCallback(output_dir=str(tmp_path), run_test=True)
+        pl_module = _make_pl_module()
+        trainer = _make_trainer({"val/mAP_50_95": 0.5})
+
+        cb.on_validation_end(trainer, pl_module)
+        cb.on_fit_end(trainer, pl_module)
+
+        trainer.test.assert_called_once_with(
+            pl_module, datamodule=trainer.datamodule
+        )
+
+    def test_run_test_false_skips_trainer_test(self, tmp_path: Path) -> None:
+        """run_test=False means trainer.test() is never called."""
+        cb = BestModelCallback(output_dir=str(tmp_path), run_test=False)
+        pl_module = _make_pl_module()
+        trainer = _make_trainer({"val/mAP_50_95": 0.5})
+
+        cb.on_validation_end(trainer, pl_module)
+        cb.on_fit_end(trainer, pl_module)
+
+        trainer.test.assert_not_called()
+
+    def test_not_global_zero_does_not_save(self, tmp_path: Path) -> None:
+        """Non-main process (is_global_zero=False) must not write any files."""
+        cb = BestModelCallback(
+            output_dir=str(tmp_path),
+            monitor_ema="val/ema_mAP_50_95",
+        )
+        pl_module = _make_pl_module()
+        trainer = _make_trainer(
+            {"val/mAP_50_95": 0.9, "val/ema_mAP_50_95": 0.9},
+            is_global_zero=False,
+        )
+
+        cb.on_validation_end(trainer, pl_module)
+        cb.on_fit_end(trainer, pl_module)
+
+        assert not (tmp_path / "checkpoint_best_regular.pth").exists()
+        assert not (tmp_path / "checkpoint_best_ema.pth").exists()
+        assert not (tmp_path / "checkpoint_best_total.pth").exists()
+
+
+# ---------------------------------------------------------------------------
+# TestRFDETREarlyStopping
+# ---------------------------------------------------------------------------
+
+
+class TestRFDETREarlyStopping:
+    """Verify early stopping logic mirrors legacy EarlyStoppingCallback."""
+
+    def test_no_stop_within_patience(self) -> None:
+        """3 epochs with no improvement, patience=5 -- training continues."""
+        cb = RFDETREarlyStopping(patience=5, min_delta=0.001)
+        pl_module = _make_pl_module()
+
+        # Seed best_map with initial improvement
+        trainer0 = _make_trainer({"val/mAP_50_95": 0.5})
+        cb.on_validation_end(trainer0, pl_module)
+
+        # 3 stagnant epochs
+        for _ in range(3):
+            trainer = _make_trainer({"val/mAP_50_95": 0.5})
+            cb.on_validation_end(trainer, pl_module)
+
+        assert trainer.should_stop is False
+        assert cb._counter == 3
+
+    def test_stops_after_patience_exceeded(self) -> None:
+        """patience=3 with 3 no-improvement epochs triggers stop."""
+        cb = RFDETREarlyStopping(patience=3, min_delta=0.001)
+        pl_module = _make_pl_module()
+
+        # Set baseline
+        trainer = _make_trainer({"val/mAP_50_95": 0.5})
+        cb.on_validation_end(trainer, pl_module)
+
+        # 3 stagnant epochs
+        for _ in range(3):
+            trainer = _make_trainer({"val/mAP_50_95": 0.5})
+            cb.on_validation_end(trainer, pl_module)
+
+        assert trainer.should_stop is True
+
+    def test_counter_resets_on_improvement(self) -> None:
+        """2 stagnant epochs then 1 improvement resets counter to 0."""
+        cb = RFDETREarlyStopping(patience=5, min_delta=0.001)
+        pl_module = _make_pl_module()
+
+        # Set baseline
+        trainer = _make_trainer({"val/mAP_50_95": 0.5})
+        cb.on_validation_end(trainer, pl_module)
+
+        # 2 stagnant
+        for _ in range(2):
+            trainer = _make_trainer({"val/mAP_50_95": 0.5})
+            cb.on_validation_end(trainer, pl_module)
+        assert cb._counter == 2
+
+        # Improvement
+        trainer = _make_trainer({"val/mAP_50_95": 0.6})
+        cb.on_validation_end(trainer, pl_module)
+        assert cb._counter == 0
+
+    def test_min_delta_respected(self) -> None:
+        """Improvement smaller than min_delta does not reset counter."""
+        cb = RFDETREarlyStopping(patience=5, min_delta=0.01)
+        pl_module = _make_pl_module()
+
+        # Set baseline at 0.5
+        trainer = _make_trainer({"val/mAP_50_95": 0.5})
+        cb.on_validation_end(trainer, pl_module)
+
+        # Improve by only half of min_delta
+        trainer = _make_trainer({"val/mAP_50_95": 0.505})
+        cb.on_validation_end(trainer, pl_module)
+        assert cb._counter == 1  # not reset
+
+    def test_use_ema_true_monitors_ema_only(self) -> None:
+        """use_ema=True with both metrics available uses EMA value only."""
+        cb = RFDETREarlyStopping(patience=5, min_delta=0.001, use_ema=True)
+        pl_module = _make_pl_module()
+
+        # EMA is 0.3 (low), regular is 0.8 (high)
+        trainer = _make_trainer(
+            {"val/mAP_50_95": 0.8, "val/ema_mAP_50_95": 0.3}
+        )
+        cb.on_validation_end(trainer, pl_module)
+
+        # best_map should be EMA value, not regular
+        assert cb._best_map == pytest.approx(0.3)
+
+    def test_use_ema_false_monitors_max(self) -> None:
+        """use_ema=False with both metrics uses max(regular, ema)."""
+        cb = RFDETREarlyStopping(patience=5, min_delta=0.001, use_ema=False)
+        pl_module = _make_pl_module()
+
+        trainer = _make_trainer(
+            {"val/mAP_50_95": 0.4, "val/ema_mAP_50_95": 0.6}
+        )
+        cb.on_validation_end(trainer, pl_module)
+
+        # max(0.4, 0.6) = 0.6
+        assert cb._best_map == pytest.approx(0.6)
+
+    def test_only_regular_available(self) -> None:
+        """When EMA key is absent, uses regular metric without error."""
+        cb = RFDETREarlyStopping(patience=5, min_delta=0.001)
+        pl_module = _make_pl_module()
+
+        trainer = _make_trainer({"val/mAP_50_95": 0.45})
+        cb.on_validation_end(trainer, pl_module)
+
+        assert cb._best_map == pytest.approx(0.45)
+        assert cb._counter == 0
+
+    def test_neither_available_is_noop(self) -> None:
+        """Neither metric present causes no counter increment and no stop."""
+        cb = RFDETREarlyStopping(patience=1, min_delta=0.001)
+        pl_module = _make_pl_module()
+
+        trainer = _make_trainer({})  # no metrics at all
+        cb.on_validation_end(trainer, pl_module)
+
+        assert cb._counter == 0
+        assert trainer.should_stop is False

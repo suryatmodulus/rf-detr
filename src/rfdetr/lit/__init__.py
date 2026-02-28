@@ -15,13 +15,20 @@ Exports:
     RFDETRDataModule: LightningDataModule wrapping dataset construction and loaders.
 """
 
-from rfdetr.lit.callbacks import DropPathCallback, RFDETREMACallback
+from rfdetr.lit.callbacks import (
+    BestModelCallback,
+    DropPathCallback,
+    RFDETREarlyStopping,
+    RFDETREMACallback,
+)
 from rfdetr.lit.datamodule import RFDETRDataModule
 from rfdetr.lit.module import RFDETRModule
 
 __all__ = [
+    "BestModelCallback",
     "DropPathCallback",
-    "RFDETRModule",
     "RFDETRDataModule",
     "RFDETREMACallback",
+    "RFDETREarlyStopping",
+    "RFDETRModule",
 ]

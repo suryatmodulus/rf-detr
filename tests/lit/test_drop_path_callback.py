@@ -16,15 +16,12 @@ import pytest
 from rfdetr.lit.callbacks.drop_schedule import DropPathCallback
 from rfdetr.util.drop_scheduler import drop_scheduler
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
 
-def _make_mock_trainer(
-    global_step: int = 0, estimated_stepping_batches: int = 50
-) -> MagicMock:
+def _make_mock_trainer(global_step: int = 0, estimated_stepping_batches: int = 50) -> MagicMock:
     """Create a minimal mock Trainer with controllable step metadata."""
     trainer = MagicMock()
     trainer.global_step = global_step
@@ -146,9 +143,7 @@ class TestOnTrainBatchStart:
         cb.on_train_batch_start(trainer, pl_module, batch=None, batch_idx=0)
 
         assert cb._dp_schedule is not None
-        pl_module.model.update_drop_path.assert_called_once_with(
-            cb._dp_schedule[0], 6
-        )
+        pl_module.model.update_drop_path.assert_called_once_with(cb._dp_schedule[0], 6)
 
     def test_update_dropout_called_with_correct_rate(self) -> None:
         """``update_dropout`` is called with the schedule value at step 0."""
@@ -162,9 +157,7 @@ class TestOnTrainBatchStart:
         cb.on_train_batch_start(trainer, pl_module, batch=None, batch_idx=0)
 
         assert cb._do_schedule is not None
-        pl_module.model.update_dropout.assert_called_once_with(
-            cb._do_schedule[0]
-        )
+        pl_module.model.update_dropout.assert_called_once_with(cb._do_schedule[0])
 
     def test_no_update_when_step_out_of_bounds(self) -> None:
         """No model updates when ``global_step`` exceeds schedule length."""
@@ -188,9 +181,7 @@ class TestOnTrainBatchStart:
             pytest.param(9, id="last_of_first_epoch"),
         ],
     )
-    def test_drop_rates_at_multiple_steps_match_schedule(
-        self, step: int
-    ) -> None:
+    def test_drop_rates_at_multiple_steps_match_schedule(self, step: int) -> None:
         """Each step uses the correct value from the pre-computed schedule."""
         cb = DropPathCallback(drop_path=0.3, vit_encoder_num_layers=6)
         trainer = _make_mock_trainer(estimated_stepping_batches=50)
@@ -202,6 +193,4 @@ class TestOnTrainBatchStart:
         cb.on_train_batch_start(trainer, pl_module, batch=None, batch_idx=0)
 
         assert cb._dp_schedule is not None
-        pl_module.model.update_drop_path.assert_called_once_with(
-            cb._dp_schedule[step], 6
-        )
+        pl_module.model.update_drop_path.assert_called_once_with(cb._dp_schedule[step], 6)
