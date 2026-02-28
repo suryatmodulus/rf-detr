@@ -98,11 +98,54 @@ class RFDETR:
         return ModelConfig(**kwargs)
 
     def train(self, **kwargs):
+        """Train an RF-DETR model via the PyTorch Lightning stack.
+
+        All keyword arguments are forwarded to :meth:`get_train_config` to build
+        a :class:`~rfdetr.config.TrainConfig`.  Two legacy kwargs are absorbed
+        silently so existing call-sites do not break:
+
+        * ``device`` — dropped; PTL selects the accelerator automatically.
+        * ``callbacks`` — if the dict contains any non-empty lists a
+          :class:`DeprecationWarning` is emitted; the dict is then discarded.
+          Use PTL :class:`~pytorch_lightning.Callback` objects passed via
+          :func:`~rfdetr.lit.build_trainer` instead.
+
+        After training completes the underlying ``nn.Module`` is synced back
+        onto ``self.model.model`` so that :meth:`predict` and :meth:`export`
+        continue to work without reloading the checkpoint.
         """
-        Train an RF-DETR model.
-        """
+        from rfdetr.lit import RFDETRDataModule, RFDETRModule, build_trainer
+
+        # Absorb legacy `callbacks` dict — warn if non-empty, then discard.
+        callbacks_dict = kwargs.pop("callbacks", None)
+        if callbacks_dict and any(callbacks_dict.values()):
+            warnings.warn(
+                "Custom callbacks dict is not forwarded to PTL. "
+                "Use PTL Callback objects instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+
+        # Absorb legacy `device` kwarg — PTL selects the accelerator automatically.
+        kwargs.pop("device", None)
+
+        # Pop `do_benchmark`; benchmarking via `.train()` is deprecated.
+        run_benchmark = bool(kwargs.pop("do_benchmark", False))
+        if run_benchmark:
+            warnings.warn(
+                "`do_benchmark` in `.train()` is deprecated; use `rfdetr benchmark`.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+
         config = self.get_train_config(**kwargs)
-        self.train_from_config(config, **kwargs)
+        module = RFDETRModule(self.model_config, config)
+        datamodule = RFDETRDataModule(self.model_config, config)
+        trainer = build_trainer(config, self.model_config)
+        trainer.fit(module, datamodule, ckpt_path=config.resume or None)
+
+        # Sync the trained weights back so predict() / export() see the updated model.
+        self.model.model = module.model
 
     def optimize_for_inference(self, compile=True, batch_size=1, dtype=torch.float32):
         self.remove_optimized_model()
