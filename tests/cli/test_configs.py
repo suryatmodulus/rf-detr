@@ -141,6 +141,4 @@ class TestConfigClassPaths:
     def test_det_uses_train_config(self, name):
         """Detection configs must use TrainConfig (not a subclass)."""
         got = _load(name)["model"]["train_config"]["class_path"]
-        assert got == "rfdetr.config.TrainConfig", (
-            f"{name}.yaml: train_config must use TrainConfig, got {got!r}"
-        )
+        assert got == "rfdetr.config.TrainConfig", f"{name}.yaml: train_config must use TrainConfig, got {got!r}"

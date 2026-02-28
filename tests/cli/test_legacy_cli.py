@@ -18,7 +18,6 @@ import sys
 import unittest.mock as mock
 import warnings
 
-
 # ---------------------------------------------------------------------------
 # Entry point config
 # ---------------------------------------------------------------------------
@@ -93,9 +92,7 @@ class TestLegacyTrainerDeprecation:
             self._call_trainer_with_coco_dir()
 
         dep_msgs = [str(w.message) for w in caught if issubclass(w.category, DeprecationWarning)]
-        assert any("1.5.1" in m for m in dep_msgs), (
-            f"Expected '1.5.1' in deprecation message; got: {dep_msgs}"
-        )
+        assert any("1.5.1" in m for m in dep_msgs), f"Expected '1.5.1' in deprecation message; got: {dep_msgs}"
 
     def test_trainer_still_functional(self):
         """trainer() still calls train_from_coco_dir when --coco_dir is given."""

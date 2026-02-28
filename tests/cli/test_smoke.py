@@ -132,8 +132,7 @@ class TestModelConfigRoundtrip:
         mc = _instantiate(class_path, init_args)
         for field, value in init_args.items():
             assert getattr(mc, field) == value, (
-                f"{name}.yaml: model_config.{field} expected {value!r}, "
-                f"got {getattr(mc, field)!r}"
+                f"{name}.yaml: model_config.{field} expected {value!r}, got {getattr(mc, field)!r}"
             )
 
 
@@ -171,7 +170,4 @@ class TestTrainConfigRoundtrip:
             # absolute, so normalise both sides for string path fields.
             if isinstance(value, str) and os.sep in value:
                 value = os.path.abspath(value)
-            assert actual == value, (
-                f"{name}.yaml: train_config.{field} expected {value!r}, "
-                f"got {actual!r}"
-            )
+            assert actual == value, f"{name}.yaml: train_config.{field} expected {value!r}, got {actual!r}"

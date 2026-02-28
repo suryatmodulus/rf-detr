@@ -84,6 +84,7 @@ tests = [
   "pytest-xdist>=3.6.1,<4",
   "pytest-rerunfailures>=10,<15",
   "faster-coco-eval>=1.7",
+  "jsonargparse[signatures]>=4.27.7",
 ]
 
 docs = [

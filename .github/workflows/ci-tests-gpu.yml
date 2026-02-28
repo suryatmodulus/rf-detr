@@ -47,7 +47,7 @@ jobs:
 
       - name: 🚀 Install Packages
         timeout-minutes: 5
-        run: uv sync --group tests --extra onnxexport --extra plus
+        run: uv sync --group tests --extra onnxexport --extra plus --extra cli
 
       - name: 🧪 Run the Test
         run: |
