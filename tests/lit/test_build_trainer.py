@@ -150,15 +150,28 @@ class TestBuildTrainerPrecision:
         assert trainer.precision == "32-true"
 
     def test_amp_true_cuda_no_bf16_gives_16_mixed(self, tmp_path):
-        """amp=True with CUDA but no bf16 support must produce '16-mixed'."""
+        """amp=True with CUDA but no bf16 support must produce '16-mixed'.
+
+        We mock the Trainer constructor to capture the precision kwarg rather
+        than inspecting trainer.precision after construction: PTL may re-detect
+        hardware bf16 support during __init__ and normalise the precision string
+        on machines that happen to have a bf16-capable GPU.
+        """
         import unittest.mock as mock
+
+        captured: dict = {}
+
+        def _fake_trainer(**kwargs):
+            captured.update(kwargs)
+            return mock.MagicMock()
 
         with (
             mock.patch("torch.cuda.is_available", return_value=True),
             mock.patch("torch.cuda.is_bf16_supported", return_value=False),
+            mock.patch("rfdetr.lit.Trainer", side_effect=_fake_trainer),
         ):
-            trainer = build_trainer(_tc(tmp_path, use_ema=False), _mc(amp=True))
-        assert trainer.precision == "16-mixed"
+            build_trainer(_tc(tmp_path, use_ema=False), _mc(amp=True))
+        assert captured["precision"] == "16-mixed"
 
     def test_amp_true_cuda_bf16_gives_bf16_mixed(self, tmp_path):
         """amp=True with CUDA + bf16 support must produce 'bf16-mixed'."""

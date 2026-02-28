@@ -447,6 +447,9 @@ def _compute_mask_iou(pred_masks: torch.Tensor, gt_masks: torch.Tensor) -> torch
     """
     n = pred_masks.shape[0]
     m = gt_masks.shape[0]
+    if pred_masks.shape[-2:] != gt_masks.shape[-2:]:
+        h, w = pred_masks.shape[-2:]
+        gt_masks = F.interpolate(gt_masks.float().unsqueeze(1), size=(h, w), mode="nearest").squeeze(1)
     pred_flat = pred_masks.bool().view(n, -1).float()  # [N, HW]
     gt_flat = gt_masks.bool().view(m, -1).float()  # [M, HW]
     inter = torch.mm(pred_flat, gt_flat.t())  # [N, M]
@@ -525,7 +528,7 @@ def _match_single_class(
 
     total_gt = int((~gt_crowd).sum().item())
     return (
-        pred_scores_sorted.cpu().numpy().astype(np.float32),
+        pred_scores_sorted.float().cpu().numpy().astype(np.float32),
         pred_match.cpu().numpy(),
         pred_ignore.cpu().numpy().astype(bool),
         total_gt,

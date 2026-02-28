@@ -10,6 +10,7 @@ from typing import Any
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from pytorch_lightning import Callback
 from torchmetrics.detection import MeanAveragePrecision
 
@@ -295,7 +296,20 @@ class COCOEvalCallback(Callback):
             boxes = box_cxcywh_to_xyxy(t["boxes"]) * scale
             entry: dict[str, torch.Tensor] = {"boxes": boxes, "labels": t["labels"]}
             if "masks" in t:
-                entry["masks"] = t["masks"].bool()
+                masks = t["masks"].bool()
+                # PostProcess resizes predicted masks to orig_size; resize GT
+                # masks to match so that mask-IoU comparisons are size-consistent.
+                if masks.shape[-2:] != (int(h), int(w)):
+                    masks = (
+                        F.interpolate(
+                            masks.float().unsqueeze(1),
+                            size=(int(h), int(w)),
+                            mode="nearest",
+                        )
+                        .squeeze(1)
+                        .bool()
+                    )
+                entry["masks"] = masks
             if "iscrowd" in t:
                 entry["iscrowd"] = t["iscrowd"]
             out.append(entry)

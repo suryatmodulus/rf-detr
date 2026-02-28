@@ -168,6 +168,6 @@ class TestTrainConfigRoundtrip:
             actual = getattr(tc, field)
             # TrainConfig.expand_paths() resolves relative path strings to
             # absolute, so normalise both sides for string path fields.
-            if isinstance(value, str) and os.sep in value:
+            if isinstance(value, str) and (os.sep in value or "/" in value):
                 value = os.path.abspath(value)
             assert actual == value, f"{name}.yaml: train_config.{field} expected {value!r}, got {actual!r}"
