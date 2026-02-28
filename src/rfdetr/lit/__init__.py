@@ -18,6 +18,7 @@ Exports:
 from rfdetr.lit.callbacks import (
     BestModelCallback,
     DropPathCallback,
+    MetricsPlotCallback,
     RFDETREarlyStopping,
     RFDETREMACallback,
 )
@@ -27,6 +28,7 @@ from rfdetr.lit.module import RFDETRModule
 __all__ = [
     "BestModelCallback",
     "DropPathCallback",
+    "MetricsPlotCallback",
     "RFDETRDataModule",
     "RFDETREMACallback",
     "RFDETREarlyStopping",
