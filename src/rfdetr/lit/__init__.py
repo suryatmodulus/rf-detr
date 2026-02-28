@@ -30,6 +30,7 @@ from rfdetr.lit.callbacks import (
     RFDETREMACallback,
 )
 from rfdetr.lit.callbacks.coco_eval import COCOEvalCallback
+from rfdetr.lit.cli import RFDETRCli
 from rfdetr.lit.datamodule import RFDETRDataModule
 from rfdetr.lit.module import RFDETRModule
 
@@ -210,6 +211,7 @@ __all__ = [
     "BestModelCallback",
     "DropPathCallback",
     "MetricsPlotCallback",
+    "RFDETRCli",
     "RFDETRDataModule",
     "RFDETREMACallback",
     "RFDETREarlyStopping",

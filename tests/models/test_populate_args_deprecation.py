@@ -22,7 +22,6 @@ import warnings
 
 import pytest
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -73,9 +72,7 @@ class TestPopulateArgsDeprecationWarning:
             capture_output=True,
             text=True,
         )
-        assert result.returncode == 0, (
-            f"subprocess failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
-        )
+        assert result.returncode == 0, f"subprocess failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
         assert "OK" in result.stdout
 
     def test_decorator_applied(self):
