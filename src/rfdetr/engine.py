@@ -613,7 +613,8 @@ def build_matching_data(
                 continue
 
             if n_gt == 0:
-                sc = p_scores.cpu().numpy().astype(np.float32)
+                # TODO: support bfloat16 natively once numpy adds bf16 dtype
+                sc = p_scores.float().cpu().numpy()
                 order = np.argsort(-sc)
                 entry["scores"].extend(sc[order].tolist())
                 entry["matches"].extend([0] * n_pred)
