@@ -180,6 +180,12 @@ class RFDETRLargeConfig(ModelConfig):
     positional_encoding_size: int = 704 // 16
     pretrain_weights: Optional[str] = "rf-detr-large-2026.pth"
     resolution: int = 704
+    # Explicit so populate_args and _build_args_from_configs agree.
+    # ModelConfig does not define these fields; without them the legacy path
+    # picks up populate_args defaults (num_select=100) while the PTL path falls
+    # back to TrainConfig.num_select (300), causing a postprocess mismatch.
+    num_queries: int = 300
+    num_select: int = 300
 
 
 class RFDETRSegPreviewConfig(RFDETRBaseConfig):

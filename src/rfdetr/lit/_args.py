@@ -94,4 +94,7 @@ def _build_args_from_configs(model_config: ModelConfig, train_config: TrainConfi
         mask_ce_loss_coef=getattr(tc, "mask_ce_loss_coef", 5.0),
         mask_dice_loss_coef=getattr(tc, "mask_dice_loss_coef", 5.0),
         mask_point_sample_ratio=getattr(tc, "mask_point_sample_ratio", 16),
+        # Evaluation extras — not in populate_args' named parameters but
+        # accepted via **extra_kwargs and forwarded into argparse.Namespace.
+        eval_max_dets=tc.eval_max_dets,
     )
