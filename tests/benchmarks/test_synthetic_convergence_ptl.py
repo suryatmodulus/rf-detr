@@ -135,11 +135,18 @@ def test_ptl_training_improves_performance(
     ptl_pre = _make_ptl_module_from(model, dataset_dir, output_dir)
 
     # Confirm evaluation uses the PTL module, not the raw nn.Module directly.
+    # Compare on CPU so the check is device-agnostic (RFDETR may be on CUDA, the
+    # freshly-constructed RFDETRModule always starts on CPU).
     _spot_key = next(iter(model.model.model.state_dict()))
     assert torch.equal(
-        model.model.model.state_dict()[_spot_key],
-        ptl_pre.model.state_dict()[_spot_key],
+        model.model.model.state_dict()[_spot_key].cpu(),
+        ptl_pre.model.state_dict()[_spot_key].cpu(),
     ), f"Pre-training weight copy failed: '{_spot_key}' differs"
+
+    # Save the pre-training parameter value before freeing the module so we can
+    # assert weights actually changed after training (ptl_pre itself is deleted
+    # to free GPU memory before the training run).
+    _pre_spot_value = ptl_pre.model.state_dict()[_spot_key].cpu().clone()
 
     with torch.no_grad():
         base_stats_val, _ = compat_evaluate(ptl_pre, val_loader, base_ds, device)
@@ -187,16 +194,16 @@ def test_ptl_training_improves_performance(
     # Confirm the post-training module carries the trained weights (not the
     # original random init), by checking the spot-key changed after training.
     assert not torch.equal(
-        ptl_pre.model.state_dict()[_spot_key],
-        ptl_post.model.state_dict()[_spot_key],
+        _pre_spot_value,
+        ptl_post.model.state_dict()[_spot_key].cpu(),
     ), (
         f"Post-training weights at '{_spot_key}' are identical to pre-training — "
         "train_ptl() may not have updated the model."
     )
-    # And that ptl_post matches the trained model exactly.
+    # And that ptl_post matches the trained model exactly (compare on CPU).
     assert torch.equal(
-        model.model.model.state_dict()[_spot_key],
-        ptl_post.model.state_dict()[_spot_key],
+        model.model.model.state_dict()[_spot_key].cpu(),
+        ptl_post.model.state_dict()[_spot_key].cpu(),
     ), f"Post-training weight sync failed: '{_spot_key}' differs between RFDETR and PTL module"
 
     with torch.no_grad():

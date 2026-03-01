@@ -87,10 +87,12 @@ def _build_ptl_module(rfdetr_obj: RFDETR, tmp_path: Path) -> RFDETRModule:
     )
 
     # Spot-check that the weight copy succeeded.
+    # Compare on CPU so the check is device-agnostic (legacy model may be on CUDA,
+    # the freshly-constructed RFDETRModule always starts on CPU).
     _first_key = next(iter(rfdetr_obj.model.model.state_dict()))
     assert torch.equal(
-        rfdetr_obj.model.model.state_dict()[_first_key],
-        ptl_module.model.state_dict()[_first_key],
+        rfdetr_obj.model.model.state_dict()[_first_key].cpu(),
+        ptl_module.model.state_dict()[_first_key].cpu(),
     ), f"Weight copy failed: '{_first_key}' differs between legacy model and PTL module"
 
     return ptl_module
