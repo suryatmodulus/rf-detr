@@ -717,6 +717,7 @@ def distributed_merge_matching_data(
 
 
 def evaluate(model, criterion, postprocess, data_loader, base_ds, device, args=None, header="Eval"):
+    model.to(device)
     model.eval()
     if args.fp16_eval:
         model.half()
