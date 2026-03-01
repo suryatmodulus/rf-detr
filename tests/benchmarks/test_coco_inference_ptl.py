@@ -16,6 +16,7 @@ For every detection and segmentation model variant, this module:
 7. Asserts the PTL path meets the same COCO baseline thresholds as the
    original :mod:`test_coco_inference` benchmark.
 """
+
 import json
 import os
 import tempfile
@@ -47,7 +48,6 @@ from rfdetr.lit.compat import evaluate as compat_evaluate
 from rfdetr.lit.module import RFDETRModule
 from rfdetr.models import build_criterion_and_postprocessors
 from rfdetr.util.misc import collate_fn
-
 
 # ---------------------------------------------------------------------------
 # Shared helper
@@ -81,12 +81,9 @@ def _build_ptl_module(rfdetr_obj: RFDETR, tmp_path: Path) -> RFDETRModule:
 
     # Assert PTL lineage — the evaluated object must be a genuine
     # LightningModule, not a raw nn.Module or a duck-typed stand-in.
-    assert isinstance(ptl_module, RFDETRModule), (
-        f"Expected RFDETRModule, got {type(ptl_module).__name__}"
-    )
+    assert isinstance(ptl_module, RFDETRModule), f"Expected RFDETRModule, got {type(ptl_module).__name__}"
     assert isinstance(ptl_module, LightningModule), (
-        "ptl_module must be a pytorch_lightning.LightningModule — "
-        "this confirms evaluation runs through the PTL stack"
+        "ptl_module must be a pytorch_lightning.LightningModule — this confirms evaluation runs through the PTL stack"
     )
 
     # Spot-check that the weight copy succeeded.
@@ -198,9 +195,7 @@ def test_ptl_detection_module_matches_legacy(
     print(f"[{test_id}] ptl:    mAP@50={ptl_map:.4f} F1={ptl_f1:.4f}")
 
     # 6. Parity: same weights must produce identical metrics.
-    assert abs(ptl_map - legacy_map) < 1e-4, (
-        f"PTL mAP@50 {ptl_map:.6f} differs from legacy {legacy_map:.6f} by > 1e-4"
-    )
+    assert abs(ptl_map - legacy_map) < 1e-4, f"PTL mAP@50 {ptl_map:.6f} differs from legacy {legacy_map:.6f} by > 1e-4"
 
     # 7. Baseline thresholds (identical to test_coco_detection_inference_benchmark).
     assert ptl_map >= threshold_map, f"PTL mAP@50 {ptl_map:.4f} < {threshold_map}"
@@ -317,9 +312,5 @@ def test_ptl_segmentation_module_matches_legacy(
     )
 
     # 7. Baseline thresholds (identical to test_coco_segmentation_inference_benchmark).
-    assert ptl_segm_map >= threshold_segm_map, (
-        f"PTL segm_mAP@50 {ptl_segm_map:.4f} < {threshold_segm_map}"
-    )
-    assert ptl_segm_f1 >= threshold_segm_f1, (
-        f"PTL segm_F1 {ptl_segm_f1:.4f} < {threshold_segm_f1}"
-    )
+    assert ptl_segm_map >= threshold_segm_map, f"PTL segm_mAP@50 {ptl_segm_map:.4f} < {threshold_segm_map}"
+    assert ptl_segm_f1 >= threshold_segm_f1, f"PTL segm_F1 {ptl_segm_f1:.4f} < {threshold_segm_f1}"

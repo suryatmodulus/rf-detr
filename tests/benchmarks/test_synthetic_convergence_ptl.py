@@ -15,6 +15,7 @@ Unlike :mod:`test_synthetic_convergence`, which evaluates via the legacy
 This avoids manually wiring ``criterion``, ``postprocess``, and ``args``,
 reducing boilerplate while keeping the same correctness guarantees.
 """
+
 import json
 import math
 import os
@@ -61,12 +62,8 @@ def _make_ptl_module_from(rfdetr_obj, dataset_dir: Path, output_dir: Path) -> RF
 
     # Guarantee the returned object is a genuine PTL LightningModule so that
     # callers can trust they are using the PTL evaluation path.
-    assert isinstance(module, RFDETRModule), (
-        f"Expected RFDETRModule, got {type(module).__name__}"
-    )
-    assert isinstance(module, LightningModule), (
-        "Module must be a pytorch_lightning.LightningModule"
-    )
+    assert isinstance(module, RFDETRModule), f"Expected RFDETRModule, got {type(module).__name__}"
+    assert isinstance(module, LightningModule), "Module must be a pytorch_lightning.LightningModule"
     return module
 
 

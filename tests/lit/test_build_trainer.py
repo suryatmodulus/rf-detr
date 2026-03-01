@@ -182,12 +182,19 @@ class TestBuildTrainerPrecision:
         """
         import unittest.mock as mock
 
+        captured: dict = {}
+
+        def _fake_trainer(**kwargs):
+            captured.update(kwargs)
+            return mock.MagicMock()
+
         with (
             mock.patch("torch.cuda.is_available", return_value=True),
             mock.patch("torch.cuda.is_bf16_supported", return_value=True),
+            mock.patch("rfdetr.lit.Trainer", side_effect=_fake_trainer),
         ):
-            trainer = build_trainer(_tc(tmp_path, use_ema=False), _mc(amp=True))
-        assert trainer.precision == "16-mixed"
+            build_trainer(_tc(tmp_path, use_ema=False), _mc(amp=True))
+        assert captured["precision"] == "16-mixed"
 
 
 class TestBuildTrainerEMAShardingGuard:
