@@ -98,6 +98,28 @@ class RFDETR:
         return ModelConfig(**kwargs)
 
     def train(self, **kwargs):
+        """Train via the legacy engine.py / main.py training stack (baseline).
+
+        All keyword arguments are forwarded to :meth:`get_train_config` to build
+        a :class:`~rfdetr.config.TrainConfig`, then on to :meth:`train_from_config`
+        which drives the legacy ``engine.py`` training loop.
+
+        The ``callbacks`` kwarg (if provided) is merged into ``self.callbacks``
+        before training starts so that caller-supplied hooks are honoured.
+        """
+        # Merge any explicit callbacks dict into self.callbacks.
+        callbacks_dict = kwargs.pop("callbacks", None)
+        if callbacks_dict:
+            for key, fns in callbacks_dict.items():
+                if callable(fns):
+                    self.callbacks[key].append(fns)
+                else:
+                    self.callbacks[key].extend(fns)
+
+        config = self.get_train_config(**kwargs)
+        self.train_from_config(config, **kwargs)
+
+    def train_ptl(self, **kwargs):
         """Train an RF-DETR model via the PyTorch Lightning stack.
 
         All keyword arguments are forwarded to :meth:`get_train_config` to build

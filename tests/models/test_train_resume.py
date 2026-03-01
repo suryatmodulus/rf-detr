@@ -33,7 +33,7 @@ def test_resume_with_completed_epochs_returns_early(synthetic_shape_dataset_dir:
 
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        model.train(
+        model.train_ptl(
             dataset_dir=str(synthetic_shape_dataset_dir),
             epochs=1,
             start_epoch=1,
@@ -69,7 +69,7 @@ def test_resume_with_completed_epochs_calls_on_train_end_callback(
     model = RFDETRNano(pretrain_weights=None, num_classes=3, device="cpu")
     model.callbacks["on_train_end"].append(_callback)
 
-    model.train(
+    model.train_ptl(
         dataset_dir=str(synthetic_shape_dataset_dir),
         epochs=1,
         batch_size=1,

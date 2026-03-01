@@ -6,10 +6,11 @@
 
 """Tests for Chapter 5 / Phase 7+8:
 
-1. ``TestRFDETRTrainShim``     — RFDETR.train() delegates to PTL build_trainer().fit()
-2. ``TestConvertLegacyCheckpoint`` — convert_legacy_checkpoint() round-trip
-3. ``TestOnLoadCheckpoint``    — RFDETRModule.on_load_checkpoint() auto-detect
-4. ``TestPublicAPIExports``    — rfdetr.__init__ exports RFDETRModule/DataModule/build_trainer
+1. ``TestRFDETRTrainPTLShim``  — RFDETR.train_ptl() delegates to PTL build_trainer().fit()
+2. ``TestRFDETRTrainLegacy``   — RFDETR.train() delegates to train_from_config() (baseline)
+3. ``TestConvertLegacyCheckpoint`` — convert_legacy_checkpoint() round-trip
+4. ``TestOnLoadCheckpoint``    — RFDETRModule.on_load_checkpoint() auto-detect
+5. ``TestPublicAPIExports``    — rfdetr.__init__ exports RFDETRModule/DataModule/build_trainer
 """
 
 import argparse
@@ -78,19 +79,19 @@ def _patch_lit():
 
 
 # ---------------------------------------------------------------------------
-# 1. RFDETR.train() shim
+# 1. RFDETR.train_ptl() shim
 # ---------------------------------------------------------------------------
 
 
-class TestRFDETRTrainShim:
-    """RFDETR.train() must delegate to PTL and absorb legacy kwargs correctly."""
+class TestRFDETRTrainPTLShim:
+    """RFDETR.train_ptl() must delegate to PTL and absorb legacy kwargs correctly."""
 
     def test_build_trainer_called_with_config_and_model_config(self, tmp_path):
         """build_trainer receives (train_config, model_config) in the right order."""
         mock_self = _make_rfdetr_self(tmp_path)
         p_mod, p_dm, p_bt, _mcls, _dmcls, mock_bt = _patch_lit()
         with p_mod, p_dm, p_bt:
-            RFDETR.train(mock_self)
+            RFDETR.train_ptl(mock_self)
 
         config = mock_self.get_train_config.return_value
         mock_bt.assert_called_once_with(config, mock_self.model_config, accelerator="auto")
@@ -100,7 +101,7 @@ class TestRFDETRTrainShim:
         mock_self = _make_rfdetr_self(tmp_path)
         p_mod, p_dm, p_bt, mcls, dmcls, mock_bt = _patch_lit()
         with p_mod, p_dm, p_bt:
-            RFDETR.train(mock_self)
+            RFDETR.train_ptl(mock_self)
 
         trainer = mock_bt.return_value
         fit_args = trainer.fit.call_args
@@ -112,7 +113,7 @@ class TestRFDETRTrainShim:
         mock_self = _make_rfdetr_self(tmp_path)  # resume defaults to None
         p_mod, p_dm, p_bt, _mcls, _dmcls, mock_bt = _patch_lit()
         with p_mod, p_dm, p_bt:
-            RFDETR.train(mock_self)
+            RFDETR.train_ptl(mock_self)
 
         trainer = mock_bt.return_value
         trainer.fit.assert_called_once_with(_mcls.return_value, _dmcls.return_value, ckpt_path=None)
@@ -122,7 +123,7 @@ class TestRFDETRTrainShim:
         mock_self = _make_rfdetr_self(tmp_path, resume="/some/checkpoint.ckpt")
         p_mod, p_dm, p_bt, _mcls, _dmcls, mock_bt = _patch_lit()
         with p_mod, p_dm, p_bt:
-            RFDETR.train(mock_self)
+            RFDETR.train_ptl(mock_self)
 
         trainer = mock_bt.return_value
         trainer.fit.assert_called_once_with(_mcls.return_value, _dmcls.return_value, ckpt_path="/some/checkpoint.ckpt")
@@ -137,7 +138,7 @@ class TestRFDETRTrainShim:
 
         p_mod, p_dm, p_bt, _mcls, _dmcls, mock_bt = _patch_lit()
         with p_mod, p_dm, p_bt:
-            RFDETR.train(mock_self)
+            RFDETR.train_ptl(mock_self)
 
         trainer = mock_bt.return_value
         _, fit_kwargs = trainer.fit.call_args
@@ -151,16 +152,16 @@ class TestRFDETRTrainShim:
         mcls.return_value.model = sentinel_nn_module
 
         with p_mod, p_dm, p_bt:
-            RFDETR.train(mock_self)
+            RFDETR.train_ptl(mock_self)
 
         assert mock_self.model.model is sentinel_nn_module
 
     def test_returns_none(self, tmp_path):
-        """RFDETR.train() has no return value."""
+        """RFDETR.train_ptl() has no return value."""
         mock_self = _make_rfdetr_self(tmp_path)
         p_mod, p_dm, p_bt, *_ = _patch_lit()
         with p_mod, p_dm, p_bt:
-            result = RFDETR.train(mock_self)
+            result = RFDETR.train_ptl(mock_self)
         assert result is None
 
     def test_device_kwarg_silently_dropped(self, tmp_path):
@@ -169,7 +170,7 @@ class TestRFDETRTrainShim:
         p_mod, p_dm, p_bt, *_ = _patch_lit()
         with p_mod, p_dm, p_bt, warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
-            RFDETR.train(mock_self, device="cuda")
+            RFDETR.train_ptl(mock_self, device="cuda")
         assert not any(issubclass(x.category, DeprecationWarning) for x in w)
         # device must not have been forwarded to get_train_config
         mock_self.get_train_config.assert_called_once_with()
@@ -180,7 +181,7 @@ class TestRFDETRTrainShim:
         p_mod, p_dm, p_bt, *_ = _patch_lit()
         with p_mod, p_dm, p_bt, warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
-            RFDETR.train(mock_self, callbacks=None)
+            RFDETR.train_ptl(mock_self, callbacks=None)
         assert not any(issubclass(x.category, DeprecationWarning) for x in w)
 
     def test_callbacks_empty_dict_no_warning(self, tmp_path):
@@ -189,7 +190,7 @@ class TestRFDETRTrainShim:
         p_mod, p_dm, p_bt, *_ = _patch_lit()
         with p_mod, p_dm, p_bt, warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
-            RFDETR.train(mock_self, callbacks={})
+            RFDETR.train_ptl(mock_self, callbacks={})
         assert not any(issubclass(x.category, DeprecationWarning) for x in w)
 
     def test_callbacks_all_empty_lists_no_warning(self, tmp_path):
@@ -199,7 +200,7 @@ class TestRFDETRTrainShim:
         p_mod, p_dm, p_bt, *_ = _patch_lit()
         with p_mod, p_dm, p_bt, warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
-            RFDETR.train(mock_self, callbacks=callbacks)
+            RFDETR.train_ptl(mock_self, callbacks=callbacks)
         assert not any(issubclass(x.category, DeprecationWarning) for x in w)
 
     def test_callbacks_non_empty_emits_deprecation_warning(self, tmp_path):
@@ -209,7 +210,7 @@ class TestRFDETRTrainShim:
         p_mod, p_dm, p_bt, *_ = _patch_lit()
         with p_mod, p_dm, p_bt, warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
-            RFDETR.train(mock_self, callbacks=callbacks)
+            RFDETR.train_ptl(mock_self, callbacks=callbacks)
         depr = [x for x in w if issubclass(x.category, DeprecationWarning)]
         assert len(depr) >= 1
         assert "PTL" in str(depr[0].message)
@@ -221,7 +222,7 @@ class TestRFDETRTrainShim:
         p_mod, p_dm, p_bt, *_ = _patch_lit()
         with p_mod, p_dm, p_bt, warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
-            RFDETR.train(mock_self, callbacks=callbacks)
+            RFDETR.train_ptl(mock_self, callbacks=callbacks)
         assert any(issubclass(x.category, DeprecationWarning) for x in w)
 
     def test_do_benchmark_false_no_warning(self, tmp_path):
@@ -230,7 +231,7 @@ class TestRFDETRTrainShim:
         p_mod, p_dm, p_bt, *_ = _patch_lit()
         with p_mod, p_dm, p_bt, warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
-            RFDETR.train(mock_self, do_benchmark=False)
+            RFDETR.train_ptl(mock_self, do_benchmark=False)
         assert not any(issubclass(x.category, DeprecationWarning) for x in w)
 
     @pytest.mark.parametrize("truthy_value", [True, 1, "yes"], ids=["bool_true", "int_1", "str_yes"])
@@ -240,7 +241,7 @@ class TestRFDETRTrainShim:
         p_mod, p_dm, p_bt, *_ = _patch_lit()
         with p_mod, p_dm, p_bt, warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
-            RFDETR.train(mock_self, do_benchmark=truthy_value)
+            RFDETR.train_ptl(mock_self, do_benchmark=truthy_value)
         depr = [x for x in w if issubclass(x.category, DeprecationWarning)]
         assert len(depr) >= 1
         assert "rfdetr benchmark" in str(depr[0].message)
@@ -251,7 +252,7 @@ class TestRFDETRTrainShim:
         p_mod, p_dm, p_bt, *_ = _patch_lit()
         with p_mod, p_dm, p_bt, warnings.catch_warnings(record=True):
             warnings.simplefilter("always")
-            RFDETR.train(mock_self, do_benchmark=True)
+            RFDETR.train_ptl(mock_self, do_benchmark=True)
         mock_self.get_train_config.assert_called_once_with()
 
     def test_device_not_forwarded_to_get_train_config(self, tmp_path):
@@ -259,9 +260,76 @@ class TestRFDETRTrainShim:
         mock_self = _make_rfdetr_self(tmp_path)
         p_mod, p_dm, p_bt, *_ = _patch_lit()
         with p_mod, p_dm, p_bt:
-            RFDETR.train(mock_self, device="cpu")
+            RFDETR.train_ptl(mock_self, device="cpu")
         # get_train_config must have been called without device=
         assert "device" not in mock_self.get_train_config.call_args.kwargs
+
+
+# ---------------------------------------------------------------------------
+# 2. RFDETR.train() legacy shim
+# ---------------------------------------------------------------------------
+
+
+class TestRFDETRTrainLegacy:
+    """RFDETR.train() must delegate to train_from_config() (legacy baseline)."""
+
+    def _make_self_with_callbacks(self, tmp_path):
+        """Return a mock whose .callbacks is a real defaultdict(list)."""
+        mock_self = _make_rfdetr_self(tmp_path)
+        mock_self.callbacks = defaultdict(list)
+        return mock_self
+
+    def test_train_from_config_called_with_config(self, tmp_path):
+        """train_from_config is called once with the TrainConfig returned by get_train_config."""
+        mock_self = _make_rfdetr_self(tmp_path)
+        RFDETR.train(mock_self)
+        config = mock_self.get_train_config.return_value
+        mock_self.train_from_config.assert_called_once()
+        assert mock_self.train_from_config.call_args[0][0] is config
+
+    def test_get_train_config_called_without_callbacks(self, tmp_path):
+        """callbacks kwarg is popped before get_train_config is called."""
+        mock_self = _make_rfdetr_self(tmp_path)
+        RFDETR.train(mock_self, callbacks={"on_fit_epoch_end": [lambda: None]})
+        assert "callbacks" not in mock_self.get_train_config.call_args.kwargs
+
+    def test_extra_kwargs_forwarded_to_train_from_config(self, tmp_path):
+        """Extra kwargs (e.g. device=) are passed through to train_from_config."""
+        mock_self = _make_rfdetr_self(tmp_path)
+        RFDETR.train(mock_self, device="cuda", epochs=5)
+        _, kwargs = mock_self.train_from_config.call_args
+        assert kwargs.get("device") == "cuda"
+        assert kwargs.get("epochs") == 5
+
+    def test_callbacks_list_merged_into_self_callbacks(self, tmp_path):
+        """A callbacks dict with lists is extended into self.callbacks."""
+        mock_self = self._make_self_with_callbacks(tmp_path)
+        fn = lambda: None  # noqa: E731
+        RFDETR.train(mock_self, callbacks={"on_train_end": [fn]})
+        assert fn in mock_self.callbacks["on_train_end"]
+
+    def test_callbacks_callable_appended_into_self_callbacks(self, tmp_path):
+        """A callbacks dict where a value is a bare callable gets appended."""
+        mock_self = self._make_self_with_callbacks(tmp_path)
+        fn = lambda: None  # noqa: E731
+        RFDETR.train(mock_self, callbacks={"on_train_end": fn})
+        assert fn in mock_self.callbacks["on_train_end"]
+
+    def test_callbacks_none_no_crash(self, tmp_path):
+        """callbacks=None is accepted silently."""
+        mock_self = _make_rfdetr_self(tmp_path)
+        RFDETR.train(mock_self, callbacks=None)  # must not raise
+
+    def test_callbacks_empty_dict_no_crash(self, tmp_path):
+        """callbacks={} is accepted silently."""
+        mock_self = _make_rfdetr_self(tmp_path)
+        RFDETR.train(mock_self, callbacks={})  # must not raise
+
+    def test_returns_none(self, tmp_path):
+        """RFDETR.train() returns None (delegates, doesn't return a value itself)."""
+        mock_self = _make_rfdetr_self(tmp_path)
+        result = RFDETR.train(mock_self)
+        assert result is None
 
 
 # ---------------------------------------------------------------------------

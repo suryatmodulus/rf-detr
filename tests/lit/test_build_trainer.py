@@ -173,8 +173,13 @@ class TestBuildTrainerPrecision:
             build_trainer(_tc(tmp_path, use_ema=False), _mc(amp=True))
         assert captured["precision"] == "16-mixed"
 
-    def test_amp_true_cuda_bf16_gives_bf16_mixed(self, tmp_path):
-        """amp=True with CUDA + bf16 support must produce 'bf16-mixed'."""
+    def test_amp_true_cuda_bf16_supported_still_gives_16_mixed(self, tmp_path):
+        """amp=True with CUDA + bf16 hardware still produces '16-mixed' (not 'bf16-mixed').
+
+        bf16 is gated behind a TODO: training from random init with only 7 mantissa
+        bits causes gradient underflow.  Until that is resolved we always fall back to
+        fp16-mixed (which uses GradScaler) even when the hardware supports bf16.
+        """
         import unittest.mock as mock
 
         with (
@@ -182,7 +187,7 @@ class TestBuildTrainerPrecision:
             mock.patch("torch.cuda.is_bf16_supported", return_value=True),
         ):
             trainer = build_trainer(_tc(tmp_path, use_ema=False), _mc(amp=True))
-        assert trainer.precision == "bf16-mixed"
+        assert trainer.precision == "16-mixed"
 
 
 class TestBuildTrainerEMAShardingGuard:

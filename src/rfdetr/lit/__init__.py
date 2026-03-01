@@ -74,9 +74,10 @@ def build_trainer(
         if not model_config.amp:
             return "32-true"
         if torch.cuda.is_available():
-            is_bf16_supported = getattr(torch.cuda, "is_bf16_supported", lambda: False)
-            if is_bf16_supported():
-                return "bf16-mixed"
+            # TODO: switch to "bf16-mixed" once we validate training stability from
+            # scratch and verify that numpy conversion sites cast to float32 first.
+            # bf16 has only 7 mantissa bits — gradients underflow when training from
+            # random init, so we fall back to fp16-mixed (which uses GradScaler).
             return "16-mixed"
         return "32-true"
 
