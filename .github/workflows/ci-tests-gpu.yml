@@ -2,7 +2,9 @@ name: GPU tests Workflow
 
 on:
   push:
-    branches: ["main", "release/*", "develop"]
+    # Appending "migration" branch to trigger GPU tests for migration work
+    #  since draft PRs don't trigger GPU tests, but we want to run them...
+    branches: ["main", "release/*", "develop", "migration"]
   pull_request:
     branches: ["main", "release/*", "develop"]
     types: [opened, synchronize, reopened, ready_for_review]
