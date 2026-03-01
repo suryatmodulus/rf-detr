@@ -50,9 +50,13 @@ from rfdetr.util.misc import NestedTensor
 logger = get_logger()
 
 
-def _get_cuda_autocast_dtype() -> torch.dtype:
-    """Return the autocast dtype that is supported on the current CUDA device."""
-    if not torch.cuda.is_available():
+def _get_autocast_dtype(device: torch.device) -> torch.dtype:
+    """Return the autocast dtype appropriate for *device*.
+
+    For non-CUDA devices the value is not used (autocast is disabled), so
+    returning ``bfloat16`` is a safe no-op default.
+    """
+    if device.type != "cuda" or not torch.cuda.is_available():
         return torch.bfloat16
 
     is_bf16_supported = getattr(torch.cuda, "is_bf16_supported", None)
@@ -63,12 +67,12 @@ def _get_cuda_autocast_dtype() -> torch.dtype:
     return torch.bfloat16 if major >= 8 else torch.float16
 
 
-def get_autocast_args(args):
-    autocast_dtype = _get_cuda_autocast_dtype()
+def get_autocast_args(args, device: torch.device):
+    autocast_dtype = _get_autocast_dtype(device)
     if DEPRECATED_AMP:
         return {"enabled": args.amp, "dtype": autocast_dtype}
     else:
-        return {"device_type": "cuda", "enabled": args.amp, "dtype": autocast_dtype}
+        return {"device_type": device.type, "enabled": args.amp, "dtype": autocast_dtype}
 
 
 def train_one_epoch(
@@ -98,7 +102,7 @@ def train_one_epoch(
     if DEPRECATED_AMP:
         scaler = GradScaler(enabled=args.amp)
     else:
-        scaler = GradScaler("cuda", enabled=args.amp)
+        scaler = GradScaler(device.type, enabled=args.amp)
 
     optimizer.zero_grad()
 
@@ -172,7 +176,7 @@ def train_one_epoch(
             new_samples = new_samples.to(device)
             new_targets = [{k: v.to(device) for k, v in t.items()} for t in targets[start_idx:final_idx]]
 
-            with autocast(**get_autocast_args(args)):
+            with autocast(**get_autocast_args(args, device)):
                 outputs = model(new_samples, new_targets)
                 loss_dict = criterion(outputs, new_targets)
                 weight_dict = criterion.weight_dict
@@ -749,7 +753,7 @@ def evaluate(model, criterion, postprocess, data_loader, base_ds, device, args=N
             samples.tensors = samples.tensors.half()
 
         # Add autocast for evaluation
-        with autocast(**get_autocast_args(args)):
+        with autocast(**get_autocast_args(args, device)):
             outputs = model(samples)
 
         if args.fp16_eval:

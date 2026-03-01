@@ -17,7 +17,7 @@ from torch import nn
 from rfdetr import engine
 from rfdetr.engine import (
     _compute_mask_iou,
-    _get_cuda_autocast_dtype,
+    _get_autocast_dtype,
     _match_single_class,
     build_matching_data,
     distributed_merge_matching_data,
@@ -28,21 +28,29 @@ from rfdetr.engine import (
 )
 from rfdetr.util.misc import NestedTensor
 
+_CUDA = torch.device("cuda")
+_CPU = torch.device("cpu")
 
-def test_get_cuda_autocast_dtype_prefers_bfloat16_when_supported(monkeypatch) -> None:
+
+def test_get_autocast_dtype_prefers_bfloat16_when_supported(monkeypatch) -> None:
     """Use bfloat16 when CUDA reports BF16 support."""
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
     monkeypatch.setattr(torch.cuda, "is_bf16_supported", lambda: True)
 
-    assert _get_cuda_autocast_dtype() == torch.bfloat16
+    assert _get_autocast_dtype(_CUDA) == torch.bfloat16
 
 
-def test_get_cuda_autocast_dtype_falls_back_to_float16_when_bfloat16_unsupported(monkeypatch) -> None:
+def test_get_autocast_dtype_falls_back_to_float16_when_bfloat16_unsupported(monkeypatch) -> None:
     """Use float16 on CUDA devices that do not support BF16 (e.g. T4)."""
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
     monkeypatch.setattr(torch.cuda, "is_bf16_supported", lambda: False)
 
-    assert _get_cuda_autocast_dtype() == torch.float16
+    assert _get_autocast_dtype(_CUDA) == torch.float16
+
+
+def test_get_autocast_dtype_returns_bfloat16_for_cpu() -> None:
+    """CPU device returns bfloat16 (autocast is disabled on CPU, value is a no-op)."""
+    assert _get_autocast_dtype(_CPU) == torch.bfloat16
 
 
 class _DummyTrainModel(nn.Module):
