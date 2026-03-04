@@ -89,7 +89,10 @@ class RFDETR:
         """
         Download pre-trained weights if they are not already downloaded.
         """
-        download_pretrain_weights(self.model_config.pretrain_weights)
+        pretrain_weights = self.model_config.pretrain_weights
+        if pretrain_weights is None:
+            return
+        download_pretrain_weights(pretrain_weights)
 
     def get_model_config(self, **kwargs):
         """

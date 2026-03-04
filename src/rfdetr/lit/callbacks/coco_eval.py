@@ -60,11 +60,12 @@ class COCOEvalCallback(Callback):
         self._cat_id_to_name: dict[int, str] = {}
         self._f1_local: dict[int, dict[str, Any]] = init_matching_accumulator()
         self._output_widget: Any = None  # ipywidgets.Output, created lazily
+        self._in_notebook: bool = False
         if in_notebook is None:
             with contextlib.suppress(ImportError):
                 from IPython import get_ipython
 
-                self._in_notebook: bool = get_ipython() is not None
+                self._in_notebook = get_ipython() is not None
         else:
             self._in_notebook = in_notebook
 

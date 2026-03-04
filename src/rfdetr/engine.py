@@ -78,12 +78,18 @@ def _get_autocast_dtype(device: torch.device) -> torch.dtype:
     return torch.bfloat16 if major >= 8 else torch.float16
 
 
+def _get_cuda_autocast_dtype() -> torch.dtype:
+    """Backward-compatible alias for CUDA autocast dtype selection."""
+    return _get_autocast_dtype(torch.device("cuda"))
+
+
 def get_autocast_args(args, device: torch.device):
+    autocast_enabled = bool(getattr(args, "amp", False)) and device.type == "cuda"
     autocast_dtype = _get_autocast_dtype(device)
     if DEPRECATED_AMP:
-        return {"enabled": args.amp, "dtype": autocast_dtype}
+        return {"enabled": autocast_enabled, "dtype": autocast_dtype}
     else:
-        return {"device_type": device.type, "enabled": args.amp, "dtype": autocast_dtype}
+        return {"device_type": device.type, "enabled": autocast_enabled, "dtype": autocast_dtype}
 
 
 def train_one_epoch(

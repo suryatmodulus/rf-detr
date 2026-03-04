@@ -102,17 +102,13 @@ def _download_file(url: str, filename: str, expected_md5: Optional[str] = None) 
             os.remove(temp_filename)
         raise
 
-    # Validate MD5 if expected hash is provided — warn only, do not abort.
-    # A stale hash in the registry should not prevent the file from being saved.
+    # Validate MD5 if expected hash is provided.
     if expected_md5:
         actual_md5 = _compute_file_md5(temp_filename)
         if actual_md5.lower() != expected_md5.lower():
-            logger.warning(
-                "MD5 mismatch for %s (expected %s, got %s). The file will still be saved; verify manually if needed.",
-                filename,
-                expected_md5,
-                actual_md5,
-            )
+            if os.path.exists(temp_filename):
+                os.remove(temp_filename)
+            raise ValueError("MD5 mismatch for %s (expected %s, got %s)." % (filename, expected_md5, actual_md5))
         else:
             logger.info(f"MD5 validation successful for {filename}")
 
