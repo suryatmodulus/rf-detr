@@ -270,6 +270,15 @@ class COCOEvalCallback(Callback):
             pl_module.log(f"{split}/precision", 0.0)
             pl_module.log(f"{split}/recall", 0.0)
 
+        # torchmetrics returns `classes` as a 0-d scalar when only one class is
+        # present in the batch.  Ensure it is always 1-d before iterating.
+        if "classes" in metrics and metrics["classes"].ndim == 0:
+            metrics = dict(metrics)
+            metrics["classes"] = metrics["classes"].unsqueeze(0)
+            for k in list(metrics):
+                if isinstance(metrics[k], torch.Tensor) and metrics[k].ndim == 0 and "per_class" in k:
+                    metrics[k] = metrics[k].unsqueeze(0)
+
         # Per-class AR from torchmetrics (keyed by category_id)
         ar_pc_key = f"{pfx}mar_{self._max_dets}_per_class"
         ar_by_cid: dict[int, float] = {}

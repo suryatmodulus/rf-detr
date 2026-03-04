@@ -23,6 +23,7 @@ import torch.utils.data
 from pytorch_lightning import Trainer
 
 from rfdetr.config import RFDETRBaseConfig, SegmentationTrainConfig, TrainConfig
+from rfdetr.lit import build_trainer
 from rfdetr.lit.datamodule import RFDETRDataModule
 from rfdetr.lit.module import RFDETRModule
 
@@ -376,3 +377,34 @@ class TestSegmentationSmoke:
 
             assert isinstance(module.train_config, SegmentationTrainConfig)
             assert isinstance(datamodule.train_config, SegmentationTrainConfig)
+
+
+class TestBuildTrainerSmoke:
+    """Smoke tests for the ``build_trainer()`` public factory.
+
+    Verifies that the full callback stack wired by ``build_trainer`` runs
+    end-to-end with ``fast_dev_run``, using mocked internals so no real
+    dataset or GPU is required.
+    """
+
+    def test_fit_via_build_trainer(self, tmp_path):
+        """build_trainer() + trainer.fit(module, datamodule=datamodule) must not raise."""
+        mc = _base_mc()
+        tc = _base_tc(tmp_path, use_ema=False, run_test=False)
+
+        with (
+            patch("rfdetr.lit.module.build_model", return_value=_TinyModel()),
+            patch(
+                "rfdetr.lit.module.build_criterion_and_postprocessors",
+                return_value=(_FakeCriterion(), MagicMock(side_effect=_fake_postprocess)),
+            ),
+            patch("rfdetr.lit.datamodule.build_dataset", return_value=_FakeDataset(length=20)),
+            patch(
+                "rfdetr.lit.module.get_param_dict",
+                side_effect=lambda args, model: _make_param_dicts(model),
+            ),
+        ):
+            module = RFDETRModule(mc, tc)
+            datamodule = RFDETRDataModule(mc, tc)
+            trainer = build_trainer(tc, mc, accelerator="cpu", fast_dev_run=2)
+            trainer.fit(module, datamodule=datamodule)

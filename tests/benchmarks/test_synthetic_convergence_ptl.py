@@ -26,10 +26,10 @@ import torch
 from pytorch_lightning import LightningModule
 
 from rfdetr import RFDETRNano
-from rfdetr.config import TrainConfig
+from rfdetr.config import RFDETRBaseConfig, TrainConfig
 from rfdetr.datasets import build_dataset, get_coco_api_from_dataset
+from rfdetr.lit import RFDETRDataModule, RFDETRModule, build_trainer
 from rfdetr.lit.compat import evaluate as compat_evaluate
-from rfdetr.lit.module import RFDETRModule
 from rfdetr.main import populate_args
 from rfdetr.util import misc as utils
 
@@ -65,6 +65,46 @@ def _make_ptl_module_from(rfdetr_obj, dataset_dir: Path, output_dir: Path) -> RF
     assert isinstance(module, RFDETRModule), f"Expected RFDETRModule, got {type(module).__name__}"
     assert isinstance(module, LightningModule), "Module must be a pytorch_lightning.LightningModule"
     return module
+
+
+def test_train_fast_dev_run(
+    tmp_path: Path,
+    synthetic_shape_dataset_dir: Path,
+) -> None:
+    """Smoke-test the full PTL stack on a real synthetic dataset with fast_dev_run.
+
+    Uses ``build_trainer(tc, mc, fast_dev_run=2)`` and
+    ``trainer.fit(module, datamodule=datamodule)`` with a real model and real
+    data (no mocking).  Only asserts the pipeline runs without error;
+    convergence is tested by the GPU-only test below.
+    """
+    output_dir = tmp_path / "output"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    with open(synthetic_shape_dataset_dir / "train" / "_annotations.coco.json") as f:
+        num_classes = len(json.load(f)["categories"])
+
+    mc = RFDETRBaseConfig(num_classes=num_classes, pretrain_weights=None)
+    tc = TrainConfig(
+        dataset_dir=str(synthetic_shape_dataset_dir),
+        output_dir=str(output_dir),
+        epochs=1,
+        batch_size=2,
+        num_workers=0,
+        use_ema=False,
+        run_test=False,
+        tensorboard=False,
+        multi_scale=False,
+        expanded_scales=False,
+        do_random_resize_via_padding=False,
+        drop_path=0.0,
+        grad_accum_steps=1,
+    )
+
+    module = RFDETRModule(mc, tc)
+    datamodule = RFDETRDataModule(mc, tc)
+    trainer = build_trainer(tc, mc, accelerator="auto", fast_dev_run=2)
+    trainer.fit(module, datamodule=datamodule)
 
 
 @pytest.mark.gpu

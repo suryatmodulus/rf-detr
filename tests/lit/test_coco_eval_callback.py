@@ -61,6 +61,20 @@ def _detection_targets(cx=0.5, cy=0.5, w=0.1, h=0.1, label=1) -> list[dict]:
 class TestSetup:
     """setup() creates map_metric with correct configuration."""
 
+    def test_init_defaults_notebook_flag_to_false_without_ipython(self) -> None:
+        """Constructor sets _in_notebook=False when IPython import is unavailable."""
+        original_import = __import__
+
+        def _import_with_missing_ipython(name: str, *args, **kwargs):
+            if name == "IPython":
+                raise ImportError("IPython not installed")
+            return original_import(name, *args, **kwargs)
+
+        with patch("builtins.__import__", side_effect=_import_with_missing_ipython):
+            cb = COCOEvalCallback(in_notebook=None)
+
+        assert cb._in_notebook is False
+
     def test_detection_iou_type_is_bbox(self) -> None:
         """Detection mode uses iou_type='bbox'."""
         cb = COCOEvalCallback(max_dets=300, segmentation=False)
