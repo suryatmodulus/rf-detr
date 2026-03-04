@@ -47,6 +47,17 @@ import numpy as np
 from rfdetr.util.misc import NestedTensor
 
 logger = get_logger()
+BYTES_TO_MB = 1024.0 * 1024.0
+
+
+def _is_cuda(device: torch.device) -> bool:
+    """Return True if device is a CUDA device with an active CUDA context."""
+    return (
+        isinstance(device, torch.device)
+        and device.type == "cuda"
+        and torch.cuda.is_available()
+        and torch.cuda.is_initialized()
+    )
 
 
 def _get_cuda_autocast_dtype() -> torch.dtype:
@@ -213,14 +224,15 @@ def train_one_epoch(
 
         if use_progress_bar:
             log_dict = {k: meter.global_avg for k, meter in metric_logger.meters.items()}
-            progress_iter.set_postfix(
-                {
-                    "lr": f"{log_dict['lr']:.6f}",
-                    "class_loss": f"{log_dict['class_error']:.2f}",
-                    "box_loss": f"{log_dict['loss_bbox']:.2f}",
-                    "loss": f"{log_dict['loss']:.2f}",
-                }
-            )
+            postfix = {
+                "lr": f"{log_dict['lr']:.6f}",
+                "class_loss": f"{log_dict['class_error']:.2f}",
+                "box_loss": f"{log_dict['loss_bbox']:.2f}",
+                "loss": f"{log_dict['loss']:.2f}",
+            }
+            if _is_cuda(device):
+                postfix["max_mem"] = f"{torch.cuda.max_memory_allocated(device=device) / BYTES_TO_MB:.0f} MB"
+            progress_iter.set_postfix(postfix)
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
     logger.info(f"Epoch {epoch + 1} stats: {metric_logger}")
@@ -482,13 +494,14 @@ def evaluate(model, criterion, postprocess, data_loader, base_ds, device, args=N
 
         if use_progress_bar:
             log_dict = {k: meter.global_avg for k, meter in metric_logger.meters.items()}
-            progress_iter.set_postfix(
-                {
-                    "class_loss": f"{log_dict['class_error']:.2f}",
-                    "box_loss": f"{log_dict['loss_bbox']:.2f}",
-                    "loss": f"{log_dict['loss']:.2f}",
-                }
-            )
+            postfix = {
+                "class_loss": f"{log_dict['class_error']:.2f}",
+                "box_loss": f"{log_dict['loss_bbox']:.2f}",
+                "loss": f"{log_dict['loss']:.2f}",
+            }
+            if _is_cuda(device):
+                postfix["max_mem"] = f"{torch.cuda.max_memory_allocated(device) / BYTES_TO_MB:.0f} MB"
+            progress_iter.set_postfix(postfix)
 
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
