@@ -5,13 +5,14 @@
 # ------------------------------------------------------------------------
 
 import types
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
 import supervision as sv
 
-from rfdetr.datasets.yolo import CocoLikeAPI, _MockSvDataset
+from rfdetr.datasets.yolo import CocoLikeAPI, _MockSvDataset, is_valid_yolo_dataset
 
 
 class TestCocoLikeAPI:
@@ -323,3 +324,59 @@ class TestBuildRoboflowFromYoloAugConfig:
         assert kwargs.get("aug_config") == aug_config, (
             f"{transform_fn} was not called with aug_config={aug_config!r}; got {kwargs}"
         )
+
+    def test_data_yml_selected_when_data_yaml_missing(self, tmp_path: Path) -> None:
+        """Regression test: build_roboflow_from_yolo picks data.yml when data.yaml is not present."""
+        (tmp_path / "data.yml").touch()
+        args = self._make_args(square_resize_div_64=False, aug_config=None)
+        args.dataset_dir = str(tmp_path)
+
+        with (
+            patch("rfdetr.datasets.yolo.make_coco_transforms") as mock_transform,
+            patch("rfdetr.datasets.yolo.YoloDetection") as mock_dataset,
+        ):
+            mock_transform.return_value = MagicMock()
+            mock_dataset.return_value = MagicMock()
+
+            from rfdetr.datasets.yolo import build_roboflow_from_yolo
+
+            build_roboflow_from_yolo("train", args, resolution=640)
+
+        _, kwargs = mock_dataset.call_args
+        assert kwargs["data_file"] == str(tmp_path / "data.yml")
+
+
+class TestIsValidYoloDataset:
+    """Tests for the is_valid_yolo_dataset function."""
+
+    def _create_valid_yolo_dataset(self, tmp_path: Path, yaml_filename: str) -> str:
+        """Create a minimal valid YOLO dataset directory structure."""
+        (tmp_path / yaml_filename).touch()
+        for split in ["train", "valid"]:
+            for subdir in ["images", "labels"]:
+                (tmp_path / split / subdir).mkdir(parents=True)
+        return str(tmp_path)
+
+    @pytest.mark.parametrize(
+        "yaml_filename",
+        [
+            pytest.param("data.yaml", id="data_yaml"),
+            pytest.param("data.yml", id="data_yml"),
+        ],
+    )
+    def test_valid_dataset_with_yaml_variants(self, tmp_path: Path, yaml_filename: str) -> None:
+        """Regression test: both data.yaml and data.yml are accepted as valid YOLO datasets."""
+        dataset_dir = self._create_valid_yolo_dataset(tmp_path, yaml_filename)
+        assert is_valid_yolo_dataset(dataset_dir) is True
+
+    def test_invalid_dataset_missing_yaml(self, tmp_path: Path) -> None:
+        """Dataset without any YAML file should be invalid."""
+        for split in ["train", "valid"]:
+            for subdir in ["images", "labels"]:
+                (tmp_path / split / subdir).mkdir(parents=True)
+        assert is_valid_yolo_dataset(str(tmp_path)) is False
+
+    def test_invalid_dataset_missing_split_dirs(self, tmp_path: Path) -> None:
+        """Dataset without required split directories should be invalid."""
+        (tmp_path / "data.yaml").touch()
+        assert is_valid_yolo_dataset(str(tmp_path)) is False
