@@ -4,6 +4,9 @@
 # Licensed under the Apache License, Version 2.0 [see LICENSE for details]
 # ------------------------------------------------------------------------
 
+import types
+from unittest.mock import MagicMock, patch
+
 import numpy as np
 import pytest
 import supervision as sv
@@ -265,3 +268,58 @@ class TestCocoLikeAPI:
         assert 0 in api.catToImgs[0]
         assert 1 in api.catToImgs[0]
         assert 0 in api.catToImgs[1]
+
+
+class TestBuildRoboflowFromYoloAugConfig:
+    """Regression tests for #769: aug_config forwarded to transform builders."""
+
+    def _make_args(self, square_resize_div_64: bool, aug_config=None) -> types.SimpleNamespace:
+        return types.SimpleNamespace(
+            dataset_dir="/fake/dataset",
+            square_resize_div_64=square_resize_div_64,
+            aug_config=aug_config,
+            segmentation_head=False,
+            multi_scale=False,
+            expanded_scales=None,
+            do_random_resize_via_padding=False,
+            patch_size=16,
+            num_windows=4,
+        )
+
+    @pytest.mark.parametrize(
+        "square_resize_div_64,transform_fn,aug_config",
+        [
+            pytest.param(
+                True,
+                "make_coco_transforms_square_div_64",
+                {"HorizontalFlip": {"p": 0.5}},
+                id="square_div_64_with_config",
+            ),
+            pytest.param(False, "make_coco_transforms", {"HorizontalFlip": {"p": 0.5}}, id="standard_with_config"),
+            pytest.param(True, "make_coco_transforms_square_div_64", None, id="square_div_64_none"),
+            pytest.param(False, "make_coco_transforms", None, id="standard_none"),
+        ],
+    )
+    def test_aug_config_forwarded_to_transform(
+        self, square_resize_div_64: bool, transform_fn: str, aug_config: object
+    ) -> None:
+        """Regression test for #769: aug_config is forwarded to transform builders for all code paths."""
+        args = self._make_args(square_resize_div_64=square_resize_div_64, aug_config=aug_config)
+
+        with (
+            patch("rfdetr.datasets.yolo.Path") as mock_path,
+            patch(f"rfdetr.datasets.yolo.{transform_fn}") as mock_transform,
+            patch("rfdetr.datasets.yolo.YoloDetection") as mock_dataset,
+        ):
+            mock_path.return_value.exists.return_value = True
+            mock_transform.return_value = MagicMock()
+            mock_dataset.return_value = MagicMock()
+
+            from rfdetr.datasets.yolo import build_roboflow_from_yolo
+
+            build_roboflow_from_yolo("train", args, resolution=640)
+
+        _, kwargs = mock_transform.call_args
+        assert kwargs.get("aug_config") == aug_config, (
+            f"{transform_fn} was not called with aug_config={aug_config!r}; got {kwargs}"
+        )
