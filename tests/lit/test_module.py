@@ -218,7 +218,7 @@ class TestLoadPretrainWeights:
     def test_class_count_mismatch_triggers_reinitialize(
         self, mock_validate, mock_torch_load, base_model_config, build_module
     ):
-        """Detection head must be reinitialized when checkpoint classes differ from config."""
+        """Detection head is expanded to checkpoint size, then trimmed back to config size."""
         mc = base_model_config(num_classes=5)
         checkpoint = self._make_checkpoint(num_classes_in_ckpt=91)
         mock_torch_load.return_value = checkpoint
@@ -227,7 +227,12 @@ class TestLoadPretrainWeights:
         module._args.pretrain_weights = "/fake/weights.pth"
         module._load_pretrain_weights()
 
-        fake_model.reinitialize_detection_head.assert_called_once_with(91)
+        # First call: expand to checkpoint size so load_state_dict shapes match.
+        # Second call: trim back to configured num_classes + 1 (background class).
+        from unittest.mock import call
+
+        fake_model.reinitialize_detection_head.assert_has_calls([call(91), call(6)])
+        assert fake_model.reinitialize_detection_head.call_count == 2
 
     @patch("rfdetr.lit.module.torch.load")
     @patch("rfdetr.lit.module.validate_pretrain_weights")

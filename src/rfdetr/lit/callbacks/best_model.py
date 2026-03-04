@@ -147,7 +147,7 @@ class BestModelCallback(Callback):
                     ckpt = torch.load(total_path, map_location="cpu", weights_only=False)
                     pl_module.model.load_state_dict(ckpt["model"], strict=True)
                     logger.info("Loaded best weights from %s for test evaluation.", total_path)
-                trainer.test(pl_module, datamodule=trainer.datamodule)
+                trainer.test(pl_module, datamodule=trainer.datamodule, verbose=False)
 
 
 class RFDETREarlyStopping(Callback):

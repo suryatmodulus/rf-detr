@@ -114,6 +114,12 @@ class RFDETRModule(LightningModule):
 
         self.model.load_state_dict(checkpoint["model"], strict=False)
 
+        # After loading checkpoint weights (which may have a different class count),
+        # trim the detection head back to the configured num_classes so that PostProcess
+        # returns labels in [0, num_classes) rather than [0, checkpoint_num_classes).
+        if checkpoint_num_classes != args.num_classes + 1:
+            self.model.reinitialize_detection_head(args.num_classes + 1)
+
     def _apply_lora(self) -> None:
         """Apply LoRA adapters to the backbone encoder.
 

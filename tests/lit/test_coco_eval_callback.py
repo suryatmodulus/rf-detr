@@ -279,6 +279,7 @@ class TestOnValidationEpochEnd:
         """val/AP/<name> is logged for each class when class metrics are present."""
         cb = COCOEvalCallback()
         cb._class_names = ["cat", "dog"]
+        cb._cat_id_to_name = {0: "cat", 1: "dog"}
         cb.setup(_make_trainer(), _make_pl_module(), stage="fit")
         cb.map_metric = MagicMock(name="map_metric")
         metrics = self._minimal_metrics()
@@ -573,6 +574,7 @@ class TestOnTestEpochEnd:
         """test/AP/<name> is logged for each class when class metrics are present."""
         cb = COCOEvalCallback()
         cb._class_names = ["cat", "dog"]
+        cb._cat_id_to_name = {0: "cat", 1: "dog"}
         cb.setup(_make_trainer(), _make_pl_module(), stage="test")
         cb.map_metric = MagicMock(name="map_metric")
         metrics = self._minimal_metrics()

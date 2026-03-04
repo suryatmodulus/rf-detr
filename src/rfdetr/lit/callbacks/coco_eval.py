@@ -51,6 +51,7 @@ class COCOEvalCallback(Callback):
         self._max_dets = max_dets
         self._segmentation = segmentation
         self._class_names: list[str] = []
+        self._cat_id_to_name: dict[int, str] = {}
         self._f1_local: dict[int, dict[str, Any]] = init_matching_accumulator()
 
     # ------------------------------------------------------------------
@@ -77,13 +78,30 @@ class COCOEvalCallback(Callback):
     def on_fit_start(self, trainer: Any, pl_module: Any) -> None:
         """Pull class names from the DataModule once the datasets are set up.
 
+        Builds a ``category_id → name`` mapping from the COCO annotation
+        metadata so that per-class AP is logged under the class name regardless
+        of whether the dataset uses sequential or non-sequential category IDs.
+
         Args:
             trainer: The PTL Trainer.
             pl_module: The LightningModule.
         """
         dm = trainer.datamodule
-        if dm is not None and hasattr(dm, "class_names"):
-            self._class_names = dm.class_names
+        if dm is None:
+            return
+        if hasattr(dm, "class_names"):
+            self._class_names = dm.class_names or []
+        # Build cat_id → name from the COCO annotation object when available.
+        for attr in ("_dataset_train", "_dataset_val"):
+            dataset = getattr(dm, attr, None)
+            if dataset is None:
+                continue
+            coco = getattr(dataset, "coco", None)
+            if coco is not None and hasattr(coco, "cats"):
+                self._cat_id_to_name = {k: v["name"] for k, v in coco.cats.items()}
+                return
+        # Fallback: treat class_names as 0-based sequential labels.
+        self._cat_id_to_name = {i: name for i, name in enumerate(self._class_names)}
 
     def on_validation_batch_end(
         self,
@@ -122,47 +140,7 @@ class COCOEvalCallback(Callback):
             trainer: The PTL Trainer.
             pl_module: The LightningModule.
         """
-        metrics = self.map_metric.compute()
-
-        # torchmetrics prefixes all keys when iou_type is a list (e.g. "bbox_map")
-        pfx = "bbox_" if self._segmentation else ""
-        mar_key = f"{pfx}mar_{self._max_dets}"
-
-        pl_module.log("val/mAP_50_95", metrics[f"{pfx}map"])
-        pl_module.log("val/mAP_50", metrics[f"{pfx}map_50"])
-        pl_module.log("val/mAP_75", metrics[f"{pfx}map_75"])
-        pl_module.log("val/mAR", metrics[mar_key])
-
-        if self._segmentation:
-            pl_module.log("val/segm_mAP_50_95", metrics["segm_map"])
-            pl_module.log("val/segm_mAP_50", metrics["segm_map_50"])
-
-        # Per-class AP (safe: class_id maps to class_names by value)
-        pc_key = f"{pfx}map_per_class"
-        if pc_key in metrics and "classes" in metrics:
-            for class_id, ap in zip(metrics["classes"], metrics[pc_key]):
-                idx = int(class_id)
-                name = self._class_names[idx] if idx < len(self._class_names) else str(idx)
-                pl_module.log(f"val/AP/{name}", ap)
-
-        # F1 sweep — gather compact matching state across all DDP ranks
-        merged = distributed_merge_matching_data(self._f1_local)
-        if merged:
-            sorted_ids = sorted(merged.keys())
-            per_class_list = [merged[cid] for cid in sorted_ids]
-            classes_with_gt = [i for i, cid in enumerate(sorted_ids) if merged[cid]["total_gt"] > 0]
-            f1_results = sweep_confidence_thresholds(per_class_list, np.linspace(0, 1, 101), classes_with_gt)
-            best = max(f1_results, key=lambda x: x["macro_f1"])
-            pl_module.log("val/F1", float(best["macro_f1"]))
-            pl_module.log("val/precision", float(best["macro_precision"]))
-            pl_module.log("val/recall", float(best["macro_recall"]))
-        else:
-            pl_module.log("val/F1", 0.0)
-            pl_module.log("val/precision", 0.0)
-            pl_module.log("val/recall", 0.0)
-
-        self.map_metric.reset()
-        self._f1_local = init_matching_accumulator()
+        self._compute_and_log(trainer, pl_module, "val")
 
     def on_test_batch_end(
         self,
@@ -204,48 +182,333 @@ class COCOEvalCallback(Callback):
             trainer: The PTL Trainer.
             pl_module: The LightningModule.
         """
+        self._compute_and_log(trainer, pl_module, "test")
+
+    # ------------------------------------------------------------------
+    # Private helpers
+    # ------------------------------------------------------------------
+
+    def _compute_and_log(self, trainer: Any, pl_module: Any, split: str) -> None:
+        """Shared epoch-end logic for validation and test evaluation loops.
+
+        Computes mAP (via ``self.map_metric``), runs the F1 confidence-threshold
+        sweep, logs all scalar metrics via ``pl_module.log``, prints two summary
+        tables to the terminal, and resets internal accumulators.
+
+        Args:
+            trainer: The PTL Trainer.
+            pl_module: The LightningModule.
+            split: Metric namespace — ``"val"`` or ``"test"``.
+        """
         metrics = self.map_metric.compute()
 
+        # torchmetrics prefixes all keys when iou_type is a list (e.g. "bbox_map")
         pfx = "bbox_" if self._segmentation else ""
         mar_key = f"{pfx}mar_{self._max_dets}"
 
-        pl_module.log("test/mAP_50_95", metrics[f"{pfx}map"])
-        pl_module.log("test/mAP_50", metrics[f"{pfx}map_50"])
-        pl_module.log("test/mAP_75", metrics[f"{pfx}map_75"])
-        pl_module.log("test/mAR", metrics[mar_key])
+        overall: dict[str, float] = {
+            "mAP 50:95": float(metrics[f"{pfx}map"]),
+            "mAP 50": float(metrics[f"{pfx}map_50"]),
+            "mAP 75": float(metrics[f"{pfx}map_75"]),
+            f"mAR @{self._max_dets}": float(metrics[mar_key]),
+        }
+
+        pl_module.log(f"{split}/mAP_50_95", metrics[f"{pfx}map"])
+        pl_module.log(f"{split}/mAP_50", metrics[f"{pfx}map_50"])
+        pl_module.log(f"{split}/mAP_75", metrics[f"{pfx}map_75"])
+        pl_module.log(f"{split}/mAR", metrics[mar_key])
 
         if self._segmentation:
-            pl_module.log("test/segm_mAP_50_95", metrics["segm_map"])
-            pl_module.log("test/segm_mAP_50", metrics["segm_map_50"])
+            overall["segm mAP 50:95"] = float(metrics["segm_map"])
+            overall["segm mAP 50"] = float(metrics["segm_map_50"])
+            pl_module.log(f"{split}/segm_mAP_50_95", metrics["segm_map"])
+            pl_module.log(f"{split}/segm_mAP_50", metrics["segm_map_50"])
 
-        pc_key = f"{pfx}map_per_class"
-        if pc_key in metrics and "classes" in metrics:
-            for class_id, ap in zip(metrics["classes"], metrics[pc_key]):
-                idx = int(class_id)
-                name = self._class_names[idx] if idx < len(self._class_names) else str(idx)
-                pl_module.log(f"test/AP/{name}", ap)
-
+        # F1 sweep — run first so per-class F1/prec/rec are available when
+        # building the unified per-class table rows below.
         merged = distributed_merge_matching_data(self._f1_local)
+        # category_id → {f1, precision, recall} at the best macro-F1 threshold
+        f1_by_cid: dict[int, dict[str, float]] = {}
         if merged:
             sorted_ids = sorted(merged.keys())
             per_class_list = [merged[cid] for cid in sorted_ids]
             classes_with_gt = [i for i, cid in enumerate(sorted_ids) if merged[cid]["total_gt"] > 0]
             f1_results = sweep_confidence_thresholds(per_class_list, np.linspace(0, 1, 101), classes_with_gt)
             best = max(f1_results, key=lambda x: x["macro_f1"])
-            pl_module.log("test/F1", float(best["macro_f1"]))
-            pl_module.log("test/precision", float(best["macro_precision"]))
-            pl_module.log("test/recall", float(best["macro_recall"]))
+            overall["F1"] = float(best["macro_f1"])
+            overall["Precision"] = float(best["macro_precision"])
+            overall["Recall"] = float(best["macro_recall"])
+            pl_module.log(f"{split}/F1", float(best["macro_f1"]))
+            pl_module.log(f"{split}/precision", float(best["macro_precision"]))
+            pl_module.log(f"{split}/recall", float(best["macro_recall"]))
+            for k, cid in enumerate(sorted_ids):
+                f1_by_cid[cid] = {
+                    "f1": float(best["per_class_f1"][k]),
+                    "precision": float(best["per_class_prec"][k]),
+                    "recall": float(best["per_class_rec"][k]),
+                }
         else:
-            pl_module.log("test/F1", 0.0)
-            pl_module.log("test/precision", 0.0)
-            pl_module.log("test/recall", 0.0)
+            overall["F1"] = 0.0
+            overall["Precision"] = 0.0
+            overall["Recall"] = 0.0
+            pl_module.log(f"{split}/F1", 0.0)
+            pl_module.log(f"{split}/precision", 0.0)
+            pl_module.log(f"{split}/recall", 0.0)
 
+        # Per-class AR from torchmetrics (keyed by category_id)
+        ar_pc_key = f"{pfx}mar_{self._max_dets}_per_class"
+        ar_by_cid: dict[int, float] = {}
+        if ar_pc_key in metrics and "classes" in metrics:
+            for class_id, ar in zip(metrics["classes"], metrics[ar_pc_key]):
+                ar_by_cid[int(class_id)] = float(ar)
+
+        # Unified per-class rows: AP 50:95 | AR | F1 | Precision | Recall
+        per_class: list[dict[str, Any]] = []
+        pc_key = f"{pfx}map_per_class"
+        if pc_key in metrics and "classes" in metrics:
+            for class_id, ap in zip(metrics["classes"], metrics[pc_key]):
+                idx = int(class_id)
+                name = self._cat_id_to_name.get(idx, str(idx))
+                pl_module.log(f"{split}/AP/{name}", ap)
+                row: dict[str, Any] = {
+                    "name": name,
+                    "ap": float(ap),
+                    "ar": ar_by_cid.get(idx, float("nan")),
+                }
+                row.update(f1_by_cid.get(idx, {"f1": float("nan"), "precision": float("nan"), "recall": float("nan")}))
+                per_class.append(row)
+
+        self._print_metrics_tables(trainer, split, overall, per_class)
         self.map_metric.reset()
         self._f1_local = init_matching_accumulator()
 
-    # ------------------------------------------------------------------
-    # Private helpers
-    # ------------------------------------------------------------------
+    def _print_metrics_tables(
+        self,
+        trainer: Any,
+        split: str,
+        overall: dict[str, float],
+        per_class: list[dict[str, Any]],
+    ) -> None:
+        """Print two tables to the terminal: overall metrics and per-class metrics.
+
+        The overall table is transposed (metrics as columns, one value row) with
+        true merged group-header cells rendered via box-drawing characters:
+        ``mAP`` spans sub-columns 50:95 / 50 / 75, ``mAR`` spans ``@N``, and
+        ``F1 sweep`` spans F1 / Prec / Recall.  The per-class table uses a
+        standard Rich ``Table`` with columns for AP 50:95, AR, F1, Prec, Recall.
+
+        Only runs on the global-zero rank to avoid duplicate output in DDP.
+
+        Args:
+            trainer: The PTL Trainer (used to check ``is_global_zero``).
+            split: ``"val"`` or ``"test"``.
+            overall: Ordered mapping of metric label → scalar value.
+            per_class: Per-class dicts with keys ``name``, ``ap``, ``ar``,
+                ``f1``, ``precision``, ``recall``; skipped when empty.
+        """
+        if not getattr(trainer, "is_global_zero", True):
+            return
+        try:
+            from rich.console import Console
+            from rich.table import Table
+            from rich.text import Text
+        except ImportError:
+            return
+
+        def _fmt(v: float) -> str:
+            return "—" if v != v else f"{v:.4f}"  # NaN → em-dash
+
+        console = Console(force_terminal=True)
+        title_pfx = split.capitalize()
+
+        # --- Table 1: Overall metrics with true merged group-header cells ---
+        console.print(Text.from_ansi(self._render_overall_merged(title_pfx, overall)))
+
+        # --- Table 2: Per-class metrics (Rich Table) ---
+        if per_class:
+            t2 = Table(
+                title=f"{title_pfx} — Per-class Metrics",
+                title_style="bold cyan",
+                show_header=True,
+                header_style="bold cyan",
+            )
+            t2.add_column("Class", style="dim", no_wrap=True)
+            t2.add_column("AP 50:95", justify="right")
+            t2.add_column("AR", justify="right")
+            t2.add_column("F1", justify="right")
+            t2.add_column("Precision", justify="right")
+            t2.add_column("Recall", justify="right")
+            for row in per_class:
+                t2.add_row(
+                    row["name"],
+                    _fmt(row["ap"]),
+                    _fmt(row["ar"]),
+                    _fmt(row["f1"]),
+                    _fmt(row["precision"]),
+                    _fmt(row["recall"]),
+                )
+            console.print(t2)
+
+    def _render_overall_merged(self, title_pfx: str, overall: dict[str, float]) -> str:
+        """Render the overall metrics table as an ANSI string with merged group cells.
+
+        Produces a transposed table where metrics are columns, grouped under
+        bold cyan header cells that span their sub-columns:
+
+        .. code-block:: text
+
+                         Val — Overall Metrics
+            ┏━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━┓
+            ┃          mAP           ┃   mAR   ┃        F1 sweep        ┃
+            ┡━━━━━━━━━┳━━━━━━┳━━━━━━╇━━━━━━━━━╇━━━━━━┳━━━━━━┳━━━━━━━━━┩
+            │  50:95  │  50  │  75  │  @500   │  F1  │ Prec │ Recall  │
+            ├─────────┼──────┼──────┼─────────┼──────┼──────┼─────────┤
+            │ -1.0000 │0.1510│0.1228│  0.4017 │0.1573│0.2607│  0.1562 │
+            └─────────┴──────┴──────┴─────────┴──────┴──────┴─────────┘
+
+        Args:
+            title_pfx: Capitalised split name used in the title (e.g. ``"Val"``).
+            overall: Ordered mapping of metric label → scalar value.
+
+        Returns:
+            Multi-line string with ANSI escape codes ready to print.
+        """
+
+        def _fmt(v: float) -> str:
+            return "—" if v != v else f"{v:.4f}"
+
+        mar_lbl = f"@{self._max_dets}"
+        mar_key = f"mAR @{self._max_dets}"
+
+        # Groups: (group_name, [(sub_label, formatted_value), ...])
+        groups: list[tuple[str, list[tuple[str, str]]]] = [
+            (
+                "mAP",
+                [
+                    ("50:95", _fmt(overall["mAP 50:95"])),
+                    ("50", _fmt(overall["mAP 50"])),
+                    ("75", _fmt(overall["mAP 75"])),
+                ],
+            ),
+            ("mAR", [(mar_lbl, _fmt(overall[mar_key]))]),
+            (
+                "F1 sweep",
+                [
+                    ("F1", _fmt(overall["F1"])),
+                    ("Prec", _fmt(overall["Precision"])),
+                    ("Recall", _fmt(overall["Recall"])),
+                ],
+            ),
+        ]
+        if "segm mAP 50:95" in overall:
+            groups.append(
+                (
+                    "segm mAP",
+                    [
+                        ("50:95", _fmt(overall["segm mAP 50:95"])),
+                        ("50", _fmt(overall["segm mAP 50"])),
+                    ],
+                )
+            )
+
+        # Flatten sub-columns and compute widths (+2 for single-space padding each side)
+        flat: list[tuple[str, str]] = [(s, v) for _, cols in groups for s, v in cols]
+        widths: list[int] = [max(len(s), len(v)) + 2 for s, v in flat]
+
+        # Expand widths so each group label fits in its merged cell
+        col = 0
+        for grp, cols in groups:
+            nc = len(cols)
+            cell_w = sum(widths[col : col + nc]) + (nc - 1)  # nc-1 internal separators
+            needed = len(grp) + 2
+            if needed > cell_w:
+                for k in range(needed - cell_w):
+                    widths[col + k % nc] += 1
+            col += nc
+
+        # Compute group spans: (start_col, end_col_inclusive, name)
+        spans: list[tuple[int, int, str]] = []
+        col = 0
+        for grp, cols in groups:
+            nc = len(cols)
+            spans.append((col, col + nc - 1, grp))
+            col += nc
+
+        grp_ends = {end for start, end, _ in spans[:-1]}
+        n = len(flat)
+
+        def grp_w(start: int, end: int) -> int:
+            """Merged cell width for columns start..end inclusive."""
+            return sum(widths[start : end + 1]) + (end - start)
+
+        # Box-drawing character sets
+        BH, BL = "━", "─"
+        VH, VL = "┃", "│"
+        TL, TR = "┏", "┓"
+        T_DN = "┳"  # heavy T-down: top-border internal group separator
+        TR_L, TR_R = "┡", "┩"  # transition-row left/right edges
+        GRP_J = "╇"  # transition-row at group boundary: heavy-up, heavy-horiz, light-down
+        SUB_J = "┯"  # transition-row within group: no-up, heavy-horiz, light-down
+        ML, MR, MX = "├", "┤", "┼"
+        BL_C, BR_C, BT = "└", "┘", "┴"
+
+        # ANSI colour codes
+        BC = "\033[1;36m"  # bold cyan
+        C = "\033[36m"  # cyan
+        R = "\033[0m"  # reset
+
+        # Title (centred over the full table width)
+        inner_w = sum(widths) + n - 1
+        title = f"{title_pfx} — Overall Metrics"
+        title_line = " " + BC + title.center(inner_w + 2) + R
+
+        # Row 1: top border — group-level separators only
+        r1 = BC + TL
+        for i, (s, e, _) in enumerate(spans):
+            r1 += BH * grp_w(s, e)
+            r1 += T_DN if i < len(spans) - 1 else TR
+        r1 += R
+
+        # Row 2: group labels centred in merged cells
+        r2 = BC + VH
+        for s, e, grp in spans:
+            r2 += grp.center(grp_w(s, e)) + VH
+        r2 += R
+
+        # Row 3: transition row — heavy horizontal; ╇ at group ends, ┯ within groups
+        r3 = BC + TR_L
+        for i, w in enumerate(widths):
+            r3 += BH * w
+            if i < n - 1:
+                r3 += GRP_J if i in grp_ends else SUB_J
+        r3 += TR_R + R
+
+        # Row 4: sub-labels with light borders
+        r4 = BC + VL
+        for i, (sub, _) in enumerate(flat):
+            r4 += sub.center(widths[i]) + VL
+        r4 += R
+
+        # Row 5: light separator between sub-labels and values
+        r5 = C + ML
+        for i, w in enumerate(widths):
+            r5 += BL * w
+            r5 += MX if i < n - 1 else MR
+        r5 += R
+
+        # Row 6: values
+        r6 = VL
+        for i, (_, val) in enumerate(flat):
+            r6 += val.center(widths[i]) + VL
+
+        # Row 7: bottom border
+        r7 = C + BL_C
+        for i, w in enumerate(widths):
+            r7 += BL * w
+            r7 += BT if i < n - 1 else BR_C
+        r7 += R
+
+        return "\n".join([title_line, r1, r2, r3, r4, r5, r6, r7])
 
     def _convert_preds(self, preds: list[dict[str, torch.Tensor]]) -> list[dict[str, torch.Tensor]]:
         """Normalise prediction dicts from ``PostProcess`` for torchmetrics.

@@ -208,7 +208,7 @@ class TestBestModelCallback:
         cb.on_validation_end(trainer, pl_module)
         cb.on_fit_end(trainer, pl_module)
 
-        trainer.test.assert_called_once_with(pl_module, datamodule=trainer.datamodule)
+        trainer.test.assert_called_once_with(pl_module, datamodule=trainer.datamodule, verbose=False)
 
     def test_run_test_true_without_test_step_skips_trainer_test(self, tmp_path: Path) -> None:
         """run_test=True but no test_step override — trainer.test() is NOT called.
