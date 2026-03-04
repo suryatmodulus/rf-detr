@@ -85,6 +85,8 @@ class RFDETRModule(LightningModule):
         re-downloads on corruption, trims query embeddings to match config.
         """
         args = self._args
+        # Download first (no-op if already present and hash is valid).
+        download_pretrain_weights(args.pretrain_weights)
         validate_pretrain_weights(args.pretrain_weights, strict=False)
         try:
             checkpoint = torch.load(args.pretrain_weights, map_location="cpu", weights_only=False)

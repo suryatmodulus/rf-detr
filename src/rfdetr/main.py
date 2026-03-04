@@ -88,6 +88,8 @@ class Model:
         if args.pretrain_weights is not None:
             logger.info("Loading pretrain weights")
 
+            # Download first (no-op if already present and hash is valid).
+            download_pretrain_weights(args.pretrain_weights)
             # Validate MD5 hash before loading (non-strict, just warns)
             validate_pretrain_weights(args.pretrain_weights, strict=False)
 
