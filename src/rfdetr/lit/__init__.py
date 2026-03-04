@@ -17,6 +17,7 @@ Exports:
 """
 
 import warnings
+from typing import Any
 
 import torch
 from pytorch_lightning import Trainer, seed_everything
@@ -41,6 +42,7 @@ def build_trainer(
     model_config: "ModelConfig",
     *,
     accelerator: str = "auto",
+    **trainer_kwargs: Any,
 ) -> Trainer:  # type: ignore[name-defined]
     """Assemble a PTL ``Trainer`` with the full RF-DETR callback and logger stack.
 
@@ -59,6 +61,14 @@ def build_trainer(
             Defaults to ``"auto"`` so PTL selects the best available device.
             Pass ``"cpu"`` to override auto-detection (e.g. when the caller
             explicitly requests CPU training via ``device="cpu"``).
+        **trainer_kwargs: Extra keyword arguments forwarded verbatim to
+            ``pytorch_lightning.Trainer``.  Use this to pass PTL-native flags
+            that are not exposed through ``TrainConfig``, for example::
+
+                build_trainer(tc, mc, fast_dev_run=2)
+
+            Any key present in both ``trainer_kwargs`` and the built config dict
+            will be overridden by the value in ``trainer_kwargs``.
 
     Returns:
         A configured ``pytorch_lightning.Trainer`` instance.
@@ -215,6 +225,7 @@ def build_trainer(
         default_root_dir=tc.output_dir,
         log_every_n_steps=50,
         deterministic=False,
+        **trainer_kwargs,
     )
 
 
