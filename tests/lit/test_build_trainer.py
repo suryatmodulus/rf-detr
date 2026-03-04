@@ -264,14 +264,15 @@ class TestBuildTrainerEMAShardingGuard:
 class TestBuildTrainerLoggers:
     """build_trainer() must wire loggers from TrainConfig flags."""
 
-    def test_no_loggers_produces_no_logger(self, tmp_path):
-        """When all logger flags are off, Trainer must have no active logger."""
+    def test_no_loggers_always_has_csv_logger(self, tmp_path):
+        """CSVLogger is always present even when all optional logger flags are off."""
+        from pytorch_lightning.loggers import CSVLogger
+
         trainer = build_trainer(
             _tc(tmp_path, use_ema=False),  # _tc already sets all loggers to False
             _mc(),
         )
-        # PTL 2.6 returns None (not False) when logger=False is passed.
-        assert not trainer.logger
+        assert any(isinstance(lg, CSVLogger) for lg in trainer.loggers)
 
     def test_tensorboard_logger_wired(self, tmp_path):
         """TensorBoardLogger is added when tensorboard=True (dep mocked)."""
@@ -313,7 +314,11 @@ class TestBuildTrainerLoggers:
                 )
         mock_logger.warning.assert_called_once()
         assert "TensorBoard" in mock_logger.warning.call_args[0][0]
-        assert not trainer.logger  # no logger wired despite flag=True
+        # CSVLogger is always present; TensorBoard was not added due to missing dep
+        from pytorch_lightning.loggers import CSVLogger, TensorBoardLogger
+
+        assert all(not isinstance(lg, TensorBoardLogger) for lg in trainer.loggers)
+        assert any(isinstance(lg, CSVLogger) for lg in trainer.loggers)
 
     def test_clearml_flag_emits_warning(self, tmp_path):
         """clearml=True must emit a UserWarning (no native PTL logger)."""

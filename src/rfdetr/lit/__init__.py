@@ -21,11 +21,7 @@ from typing import Any
 
 import torch
 from pytorch_lightning import Trainer, seed_everything
-
-from rfdetr.util.logger import get_logger
-
-_logger = get_logger()
-from pytorch_lightning.loggers import MLFlowLogger, TensorBoardLogger, WandbLogger
+from pytorch_lightning.loggers import CSVLogger, MLFlowLogger, TensorBoardLogger, WandbLogger
 
 from rfdetr.lit.callbacks import (
     BestModelCallback,
@@ -39,6 +35,9 @@ from rfdetr.lit.checkpoint import convert_legacy_checkpoint
 from rfdetr.lit.cli import RFDETRCli
 from rfdetr.lit.datamodule import RFDETRDataModule
 from rfdetr.lit.module import RFDETRModule
+from rfdetr.util.logger import get_logger
+
+_logger = get_logger()
 
 
 def build_trainer(
@@ -151,7 +150,9 @@ def build_trainer(
     # Each logger is guarded by a try/except because tensorboard, wandb, and mlflow
     # are optional dependencies (installed via the [metrics] extra).  A missing dep
     # emits a UserWarning instead of crashing.
-    loggers = []
+    # CSVLogger is always enabled — no extra package required.
+    # Produces metrics.csv in output_dir so there is always a log file.
+    loggers: list = [CSVLogger(save_dir=tc.output_dir, name="", version="")]
 
     if tc.tensorboard:
         try:
