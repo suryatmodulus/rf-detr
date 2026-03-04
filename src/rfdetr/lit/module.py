@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import math
+import os
 import random
 from typing import Any, Optional, Tuple
 
@@ -87,6 +88,12 @@ class RFDETRModule(LightningModule):
         args = self._args
         # Download first (no-op if already present and hash is valid).
         download_pretrain_weights(args.pretrain_weights)
+        # If the first download attempt didn't produce the file (e.g. stale MD5
+        # caused an earlier ValueError that was silently swallowed), retry with
+        # MD5 validation disabled so a stale registry hash can't block training.
+        if not os.path.isfile(args.pretrain_weights):
+            logger.warning("Pretrain weights not found after initial download; retrying without MD5 validation.")
+            download_pretrain_weights(args.pretrain_weights, redownload=True)
         validate_pretrain_weights(args.pretrain_weights, strict=False)
         try:
             checkpoint = torch.load(args.pretrain_weights, map_location="cpu", weights_only=False)

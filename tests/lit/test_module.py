@@ -280,9 +280,12 @@ class TestLoadPretrainWeights:
         assert checkpoint["model"]["refpoint_embed.weight"].shape[0] == desired
         assert checkpoint["model"]["query_feat.weight"].shape[0] == desired
 
+    @patch("rfdetr.lit.module.os.path.isfile", return_value=True)
     @patch("rfdetr.lit.module.download_pretrain_weights")
     @patch("rfdetr.lit.module.validate_pretrain_weights")
-    def test_redownloads_on_load_failure(self, mock_validate, mock_download, base_model_config, build_module):
+    def test_redownloads_on_load_failure(
+        self, mock_validate, mock_download, mock_isfile, base_model_config, build_module
+    ):
         """A corrupted checkpoint must trigger re-download and a second load attempt."""
         mc = base_model_config(num_classes=90)
         checkpoint = self._make_checkpoint(num_classes_in_ckpt=91)
@@ -300,8 +303,38 @@ class TestLoadPretrainWeights:
         with patch("rfdetr.lit.module.torch.load", side_effect=fake_torch_load):
             module._load_pretrain_weights()
 
-        mock_download.assert_called_once_with("/fake/weights.pth", redownload=True)
+        # Verify a redownload with validate_md5=False was triggered after load failure.
+        redownload_calls = [c for c in mock_download.call_args_list if c.kwargs.get("redownload") is True]
+        assert len(redownload_calls) >= 1
+        assert all(c.kwargs.get("validate_md5") is False for c in redownload_calls)
         assert load_calls[0] == 2
+
+    @patch("rfdetr.lit.module.os.path.isfile", return_value=False)
+    @patch("rfdetr.lit.module.download_pretrain_weights")
+    @patch("rfdetr.lit.module.validate_pretrain_weights")
+    @patch("rfdetr.lit.module.torch.load")
+    def test_download_before_load_when_weights_absent(
+        self, mock_torch_load, mock_validate, mock_download, mock_isfile, base_model_config, build_module
+    ):
+        """download_pretrain_weights must be called before torch.load so a fresh
+        environment (e.g. Colab) downloads weights automatically.
+
+        Regression test: previously download was only called as an except-block
+        fallback, but ModelWeights.from_filename received the absolute path and
+        returned None, causing a silent no-op and a FileNotFoundError.
+        """
+        mc = base_model_config(num_classes=90)
+        checkpoint = self._make_checkpoint(num_classes_in_ckpt=91)
+        mock_torch_load.return_value = checkpoint
+
+        module, _, _, _ = build_module(model_config=mc)
+        module._args.pretrain_weights = "/content/rf-detr-base.pth"
+        module._load_pretrain_weights()
+
+        # download_pretrain_weights must have been called at least once before any load
+        assert mock_download.call_count >= 1
+        first_call = mock_download.call_args_list[0]
+        assert first_call.args[0] == "/content/rf-detr-base.pth"
 
     @patch("rfdetr.lit.module.torch.load")
     @patch("rfdetr.lit.module.validate_pretrain_weights")

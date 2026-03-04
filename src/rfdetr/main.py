@@ -90,6 +90,8 @@ class Model:
 
             # Download first (no-op if already present and hash is valid).
             download_pretrain_weights(args.pretrain_weights)
+            if not os.path.isfile(args.pretrain_weights):
+                download_pretrain_weights(args.pretrain_weights, redownload=True, validate_md5=False)
             # Validate MD5 hash before loading (non-strict, just warns)
             validate_pretrain_weights(args.pretrain_weights, strict=False)
 
@@ -99,7 +101,7 @@ class Model:
                 logger.error(f"Failed to load pretrain weights: {e}")
                 # re-download weights if they are corrupted
                 logger.info("Failed to load pretrain weights, re-downloading")
-                download_pretrain_weights(args.pretrain_weights, redownload=True)
+                download_pretrain_weights(args.pretrain_weights, redownload=True, validate_md5=False)
                 checkpoint = torch.load(args.pretrain_weights, map_location="cpu", weights_only=False)
 
             # Extract class_names from checkpoint if available
