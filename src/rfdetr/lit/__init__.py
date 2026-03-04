@@ -21,6 +21,10 @@ from typing import Any
 
 import torch
 from pytorch_lightning import Trainer, seed_everything
+
+from rfdetr.util.logger import get_logger
+
+_logger = get_logger()
 from pytorch_lightning.loggers import MLFlowLogger, TensorBoardLogger, WandbLogger
 
 from rfdetr.lit.callbacks import (
@@ -154,16 +158,12 @@ def build_trainer(
             loggers.append(
                 TensorBoardLogger(
                     save_dir=tc.output_dir,
-                    name=tc.run or "rfdetr",
+                    name="",
                     version="",
                 )
             )
         except ModuleNotFoundError as exc:
-            warnings.warn(
-                f"TensorBoard logging disabled: {exc}. Install with `pip install tensorboard`.",
-                UserWarning,
-                stacklevel=2,
-            )
+            _logger.warning("TensorBoard logging disabled: %s. Install with: pip install tensorboard", exc)
 
     if tc.wandb:
         try:
@@ -175,11 +175,7 @@ def build_trainer(
                 )
             )
         except ModuleNotFoundError as exc:
-            warnings.warn(
-                f"WandB logging disabled: {exc}. Install with `pip install wandb`.",
-                UserWarning,
-                stacklevel=2,
-            )
+            _logger.warning("WandB logging disabled: %s. Install with: pip install wandb", exc)
 
     if tc.mlflow:
         try:
@@ -191,11 +187,7 @@ def build_trainer(
                 )
             )
         except ModuleNotFoundError as exc:
-            warnings.warn(
-                f"MLflow logging disabled: {exc}. Install with `pip install mlflow`.",
-                UserWarning,
-                stacklevel=2,
-            )
+            _logger.warning("MLflow logging disabled: %s. Install with: pip install mlflow", exc)
 
     if tc.clearml:
         warnings.warn(

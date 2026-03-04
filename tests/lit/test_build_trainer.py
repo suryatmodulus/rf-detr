@@ -302,18 +302,17 @@ class TestBuildTrainerLoggers:
         assert fake_logger in trainer.loggers
 
     def test_missing_tensorboard_dep_warns_not_crashes(self, tmp_path):
-        """If tensorboard package is absent, a UserWarning is emitted and training continues."""
+        """If tensorboard package is absent, a warning is logged and training continues."""
         import unittest.mock as mock
 
         with mock.patch("rfdetr.lit.TensorBoardLogger", side_effect=ModuleNotFoundError("no tensorboard")):
-            with warnings.catch_warnings(record=True) as caught:
-                warnings.simplefilter("always")
+            with mock.patch("rfdetr.lit._logger") as mock_logger:
                 trainer = build_trainer(
                     _tc(tmp_path, tensorboard=True, use_ema=False),
                     _mc(),
                 )
-        user_warns = [w for w in caught if issubclass(w.category, UserWarning)]
-        assert any("TensorBoard" in str(w.message) for w in user_warns)
+        mock_logger.warning.assert_called_once()
+        assert "TensorBoard" in mock_logger.warning.call_args[0][0]
         assert not trainer.logger  # no logger wired despite flag=True
 
     def test_clearml_flag_emits_warning(self, tmp_path):

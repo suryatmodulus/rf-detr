@@ -93,13 +93,13 @@ class RFDETRModule(LightningModule):
         # MD5 validation disabled so a stale registry hash can't block training.
         if not os.path.isfile(args.pretrain_weights):
             logger.warning("Pretrain weights not found after initial download; retrying without MD5 validation.")
-            download_pretrain_weights(args.pretrain_weights, redownload=True)
+            download_pretrain_weights(args.pretrain_weights, redownload=True, validate_md5=False)
         validate_pretrain_weights(args.pretrain_weights, strict=False)
         try:
             checkpoint = torch.load(args.pretrain_weights, map_location="cpu", weights_only=False)
         except Exception:
             logger.info("Failed to load pretrain weights, re-downloading")
-            download_pretrain_weights(args.pretrain_weights, redownload=True)
+            download_pretrain_weights(args.pretrain_weights, redownload=True, validate_md5=False)
             checkpoint = torch.load(args.pretrain_weights, map_location="cpu", weights_only=False)
 
         if "args" in checkpoint and hasattr(checkpoint["args"], "class_names"):
