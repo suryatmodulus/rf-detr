@@ -6,6 +6,7 @@
 
 """COCOEvalCallback — torchmetrics-based mAP and F1 evaluation (Phase 3)."""
 
+import contextlib
 from typing import Any
 
 import numpy as np
@@ -46,13 +47,26 @@ class COCOEvalCallback(Callback):
             ``backend="faster_coco_eval"``. Defaults to ``False``.
     """
 
-    def __init__(self, max_dets: int = 500, segmentation: bool = False) -> None:
+    def __init__(
+        self,
+        max_dets: int = 500,
+        segmentation: bool = False,
+        in_notebook: bool | None = None,
+    ) -> None:
         super().__init__()
         self._max_dets = max_dets
         self._segmentation = segmentation
         self._class_names: list[str] = []
         self._cat_id_to_name: dict[int, str] = {}
         self._f1_local: dict[int, dict[str, Any]] = init_matching_accumulator()
+        self._output_widget: Any = None  # ipywidgets.Output, created lazily
+        if in_notebook is None:
+            with contextlib.suppress(ImportError):
+                from IPython import get_ipython
+
+                self._in_notebook: bool = get_ipython() is not None
+        else:
+            self._in_notebook = in_notebook
 
     # ------------------------------------------------------------------
     # PTL lifecycle hooks
@@ -263,18 +277,21 @@ class COCOEvalCallback(Callback):
                 ar_by_cid[int(class_id)] = float(ar)
 
         # Unified per-class rows: AP 50:95 | AR | F1 | Precision | Recall
+        # Classes with no ground-truth annotations are skipped (pycocotools
+        # returns -1 for AP and torchmetrics returns NaN for AR on such classes,
+        # so they would show as all dashes in the table).
         per_class: list[dict[str, Any]] = []
         pc_key = f"{pfx}map_per_class"
         if pc_key in metrics and "classes" in metrics:
             for class_id, ap in zip(metrics["classes"], metrics[pc_key]):
+                ap_f = float(ap)
+                ar_f = ar_by_cid.get(int(class_id), float("nan"))
+                if ap_f < 0 and ar_f != ar_f:  # no ground-truth: skip ghost class
+                    continue
                 idx = int(class_id)
                 name = self._cat_id_to_name.get(idx, str(idx))
                 pl_module.log(f"{split}/AP/{name}", ap)
-                row: dict[str, Any] = {
-                    "name": name,
-                    "ap": float(ap),
-                    "ar": ar_by_cid.get(idx, float("nan")),
-                }
+                row: dict[str, Any] = {"name": name, "ap": ap_f, "ar": ar_f}
                 row.update(f1_by_cid.get(idx, {"f1": float("nan"), "precision": float("nan"), "recall": float("nan")}))
                 per_class.append(row)
 
@@ -311,59 +328,83 @@ class COCOEvalCallback(Callback):
         try:
             from rich.console import Console
             from rich.table import Table
-            from rich.text import Text
         except ImportError:
             return
 
         def _fmt(v: float) -> str:
-            return "—" if v != v else f"{v:.4f}"  # NaN → em-dash
+            if v != v or v < 0:  # NaN or pycocotools sentinel -1 → em-dash
+                return "—"
+            return f"{v:.4f}"
 
         console = Console(force_terminal=True)
         title_pfx = split.capitalize()
 
-        # --- Table 1: Overall metrics with true merged group-header cells ---
-        console.print(Text.from_ansi(self._render_overall_merged(title_pfx, overall)))
+        def _render_all() -> None:
+            # Table 1: Overall metrics — colour-free merged-header table.
+            console.print(self._render_overall_merged(title_pfx, overall))
 
-        # --- Table 2: Per-class metrics (Rich Table) ---
-        if per_class:
-            t2 = Table(
-                title=f"{title_pfx} — Per-class Metrics",
-                title_style="bold cyan",
-                show_header=True,
-                header_style="bold cyan",
-            )
-            t2.add_column("Class", style="dim", no_wrap=True)
-            t2.add_column("AP 50:95", justify="right")
-            t2.add_column("AR", justify="right")
-            t2.add_column("F1", justify="right")
-            t2.add_column("Precision", justify="right")
-            t2.add_column("Recall", justify="right")
-            for row in per_class:
-                t2.add_row(
-                    row["name"],
-                    _fmt(row["ap"]),
-                    _fmt(row["ar"]),
-                    _fmt(row["f1"]),
-                    _fmt(row["precision"]),
-                    _fmt(row["recall"]),
+            # Table 2: Per-class metrics (Rich Table)
+            if per_class:
+                t2 = Table(
+                    title=f"{title_pfx} — Per-class Metrics",
+                    title_style="bold cyan",
+                    show_header=True,
+                    header_style="bold cyan",
                 )
-            console.print(t2)
+                t2.add_column("Class", style="dim", no_wrap=True)
+                t2.add_column("AP 50:95", justify="right")
+                t2.add_column("AR", justify="right")
+                t2.add_column("F1", justify="right")
+                t2.add_column("Precision", justify="right")
+                t2.add_column("Recall", justify="right")
+                for row in per_class:
+                    t2.add_row(
+                        row["name"],
+                        _fmt(row["ap"]),
+                        _fmt(row["ar"]),
+                        _fmt(row["f1"]),
+                        _fmt(row["precision"]),
+                        _fmt(row["recall"]),
+                    )
+                console.print(t2)
+
+        if self._in_notebook:
+            # Lazily create an ipywidgets.Output on the first table print so it
+            # anchors below the progress bar that is already visible.  Subsequent
+            # epochs clear only the widget's isolated slot — the main cell output
+            # (and PTL's progress bar) is never touched, so there is no flicker.
+            if self._output_widget is None:
+                with contextlib.suppress(ImportError):
+                    import ipywidgets as widgets
+                    from IPython.display import display
+
+                    self._output_widget = widgets.Output()
+                    display(self._output_widget)
+
+            if self._output_widget is not None:
+                self._output_widget.clear_output(wait=True)
+                with self._output_widget:
+                    _render_all()
+                return
+
+        _render_all()
 
     def _render_overall_merged(self, title_pfx: str, overall: dict[str, float]) -> str:
-        """Render the overall metrics table as an ANSI string with merged group cells.
+        """Render the overall metrics table with merged group-header cells.
 
-        Produces a transposed table where metrics are columns, grouped under
-        bold cyan header cells that span their sub-columns:
+        Uses only plain Unicode box-drawing characters (no ANSI colour codes)
+        so the output renders correctly in both terminals and Jupyter/Colab
+        notebook widgets.
 
         .. code-block:: text
 
-                         Val — Overall Metrics
-            ┏━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━┓
-            ┃          mAP           ┃   mAR   ┃        F1 sweep        ┃
+                        Val — Overall Metrics
+            ┏━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━┓
+            ┃          mAP          ┃   mAR   ┃        F1 sweep       ┃
             ┡━━━━━━━━━┳━━━━━━┳━━━━━━╇━━━━━━━━━╇━━━━━━┳━━━━━━┳━━━━━━━━━┩
             │  50:95  │  50  │  75  │  @500   │  F1  │ Prec │ Recall  │
             ├─────────┼──────┼──────┼─────────┼──────┼──────┼─────────┤
-            │ -1.0000 │0.1510│0.1228│  0.4017 │0.1573│0.2607│  0.1562 │
+            │    —    │0.1510│0.1228│  0.4017 │0.1573│0.2607│  0.1562 │
             └─────────┴──────┴──────┴─────────┴──────┴──────┴─────────┘
 
         Args:
@@ -371,11 +412,13 @@ class COCOEvalCallback(Callback):
             overall: Ordered mapping of metric label → scalar value.
 
         Returns:
-            Multi-line string with ANSI escape codes ready to print.
+            Multi-line plain-text string ready to pass to ``console.print()``.
         """
 
         def _fmt(v: float) -> str:
-            return "—" if v != v else f"{v:.4f}"
+            if v != v or v < 0:  # NaN or pycocotools sentinel -1 → em-dash
+                return "—"
+            return f"{v:.4f}"
 
         mar_lbl = f"@{self._max_dets}"
         mar_key = f"mAR @{self._max_dets}"
@@ -452,49 +495,40 @@ class COCOEvalCallback(Callback):
         ML, MR, MX = "├", "┤", "┼"
         BL_C, BR_C, BT = "└", "┘", "┴"
 
-        # ANSI colour codes
-        BC = "\033[1;36m"  # bold cyan
-        C = "\033[36m"  # cyan
-        R = "\033[0m"  # reset
-
         # Title (centred over the full table width)
         inner_w = sum(widths) + n - 1
         title = f"{title_pfx} — Overall Metrics"
-        title_line = " " + BC + title.center(inner_w + 2) + R
+        title_line = title.center(inner_w + 2)
 
         # Row 1: top border — group-level separators only
-        r1 = BC + TL
+        r1 = TL
         for i, (s, e, _) in enumerate(spans):
             r1 += BH * grp_w(s, e)
             r1 += T_DN if i < len(spans) - 1 else TR
-        r1 += R
 
         # Row 2: group labels centred in merged cells
-        r2 = BC + VH
+        r2 = VH
         for s, e, grp in spans:
             r2 += grp.center(grp_w(s, e)) + VH
-        r2 += R
 
         # Row 3: transition row — heavy horizontal; ╇ at group ends, ┯ within groups
-        r3 = BC + TR_L
+        r3 = TR_L
         for i, w in enumerate(widths):
             r3 += BH * w
             if i < n - 1:
                 r3 += GRP_J if i in grp_ends else SUB_J
-        r3 += TR_R + R
+        r3 += TR_R
 
         # Row 4: sub-labels with light borders
-        r4 = BC + VL
+        r4 = VL
         for i, (sub, _) in enumerate(flat):
             r4 += sub.center(widths[i]) + VL
-        r4 += R
 
         # Row 5: light separator between sub-labels and values
-        r5 = C + ML
+        r5 = ML
         for i, w in enumerate(widths):
             r5 += BL * w
             r5 += MX if i < n - 1 else MR
-        r5 += R
 
         # Row 6: values
         r6 = VL
@@ -502,11 +536,10 @@ class COCOEvalCallback(Callback):
             r6 += val.center(widths[i]) + VL
 
         # Row 7: bottom border
-        r7 = C + BL_C
+        r7 = BL_C
         for i, w in enumerate(widths):
             r7 += BL * w
             r7 += BT if i < n - 1 else BR_C
-        r7 += R
 
         return "\n".join([title_line, r1, r2, r3, r4, r5, r6, r7])
 

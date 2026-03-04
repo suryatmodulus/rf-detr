@@ -11,7 +11,7 @@ from __future__ import annotations
 import math
 import os
 import random
-from typing import Any, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
 import torch
@@ -260,12 +260,13 @@ class RFDETRModule(LightningModule):
             Scalar loss tensor.
         """
         samples, targets = batch
+        batch_size = len(targets)
         outputs = self.model(samples, targets)
         loss_dict = self.criterion(outputs, targets)
         weight_dict = self.criterion.weight_dict
         loss = sum(loss_dict[k] * weight_dict[k] for k in loss_dict if k in weight_dict)
-        self.log_dict({f"train/{k}": v for k, v in loss_dict.items()}, sync_dist=True)
-        self.log("train/loss", loss, prog_bar=True, sync_dist=True)
+        self.log_dict({f"train/{k}": v for k, v in loss_dict.items()}, sync_dist=True, batch_size=batch_size)
+        self.log("train/loss", loss, prog_bar=True, sync_dist=True, batch_size=batch_size)
         return loss
 
     def validation_step(self, batch: Tuple, batch_idx: int) -> Dict[str, Any]:
@@ -286,7 +287,7 @@ class RFDETRModule(LightningModule):
         loss_dict = self.criterion(outputs, targets)
         weight_dict = self.criterion.weight_dict
         loss = sum(loss_dict[k] * weight_dict[k] for k in loss_dict if k in weight_dict)
-        self.log("val/loss", loss, sync_dist=True)
+        self.log("val/loss", loss, sync_dist=True, batch_size=len(targets))
 
         orig_sizes = torch.stack([t["orig_size"] for t in targets])
         results = self.postprocess(outputs, orig_sizes)
@@ -349,7 +350,7 @@ class RFDETRModule(LightningModule):
         loss_dict = self.criterion(outputs, targets)
         weight_dict = self.criterion.weight_dict
         loss = sum(loss_dict[k] * weight_dict[k] for k in loss_dict if k in weight_dict)
-        self.log("test/loss", loss, sync_dist=True)
+        self.log("test/loss", loss, sync_dist=True, batch_size=len(targets))
 
         orig_sizes = torch.stack([t["orig_size"] for t in targets])
         results = self.postprocess(outputs, orig_sizes)
