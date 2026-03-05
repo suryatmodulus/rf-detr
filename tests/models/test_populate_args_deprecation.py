@@ -126,3 +126,22 @@ class TestPopulateArgsStillFunctional:
     def test_kwargs_forwarded_to_namespace(self, field, value):
         """Arbitrary kwargs are faithfully forwarded to the returned Namespace."""
         assert getattr(_call(**{field: value}), field) == value
+
+    def test_segmentation_loss_defaults_present(self):
+        """Segmentation loss coefficients default to the legacy expected values."""
+        args = _call(segmentation_head=True)
+        assert args.mask_ce_loss_coef == pytest.approx(5.0)
+        assert args.mask_dice_loss_coef == pytest.approx(5.0)
+        assert args.mask_point_sample_ratio == 16
+
+    def test_segmentation_loss_overrides_forwarded(self):
+        """Explicit segmentation loss kwargs are forwarded to Namespace."""
+        args = _call(
+            segmentation_head=True,
+            mask_ce_loss_coef=7.5,
+            mask_dice_loss_coef=3.25,
+            mask_point_sample_ratio=8,
+        )
+        assert args.mask_ce_loss_coef == pytest.approx(7.5)
+        assert args.mask_dice_loss_coef == pytest.approx(3.25)
+        assert args.mask_point_sample_ratio == 8

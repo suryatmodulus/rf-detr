@@ -407,7 +407,8 @@ def test_ptl_native_detection_validation_parity(
     legacy_map = legacy_stats["results_json"]["map"]
 
     ptl_module = _build_ptl_module(rfdetr, tc)
-    trainer = build_trainer(tc, config, accelerator="auto")
+    # Match legacy engine.evaluate precision (fp16_eval=False) for tighter parity.
+    trainer = build_trainer(tc, config, accelerator="auto", precision="32-true")
     results = trainer.validate(ptl_module, datamodule=dm)
     ptl_map = results[0]["val/mAP_50"]
 
@@ -475,7 +476,8 @@ def test_ptl_native_segmentation_validation_parity(
     legacy_segm_map = legacy_stats["results_json_masks"]["map"]
 
     ptl_module = _build_ptl_module(rfdetr, tc)
-    trainer = build_trainer(tc, config, accelerator="auto")
+    # Match legacy engine.evaluate precision (fp16_eval=False) for tighter parity.
+    trainer = build_trainer(tc, config, accelerator="auto", precision="32-true")
     results = trainer.validate(ptl_module, datamodule=dm)
     ptl_segm_map = results[0]["val/segm_mAP_50"]
 

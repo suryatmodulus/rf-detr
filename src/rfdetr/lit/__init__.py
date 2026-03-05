@@ -80,7 +80,7 @@ def build_trainer(
     def _resolve_precision() -> str:
         if not model_config.amp:
             return "32-true"
-        if torch.cuda.is_available():
+        if torch.cuda.is_available() or torch.backends.mps.is_available():
             # TODO: switch to "bf16-mixed" once we validate training stability from
             # scratch and verify that numpy conversion sites cast to float32 first.
             # bf16 has only 7 mantissa bits — gradients underflow when training from
