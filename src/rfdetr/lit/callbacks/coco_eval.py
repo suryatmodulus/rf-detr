@@ -45,17 +45,24 @@ class COCOEvalCallback(Callback):
             ``MeanAveragePrecision``. Defaults to 500.
         segmentation: When ``True``, evaluate both bbox and segm IoU using
             ``backend="faster_coco_eval"``. Defaults to ``False``.
+        eval_interval: Run validation metrics every N epochs. Test metrics are
+            always computed when ``trainer.test()`` is called.
+        log_per_class_metrics: When ``False``, skip per-class AP logging/table.
     """
 
     def __init__(
         self,
         max_dets: int = 500,
         segmentation: bool = False,
+        eval_interval: int = 1,
+        log_per_class_metrics: bool = True,
         in_notebook: bool | None = None,
     ) -> None:
         super().__init__()
         self._max_dets = max_dets
         self._segmentation = segmentation
+        self._eval_interval = max(1, int(eval_interval))
+        self._log_per_class_metrics = bool(log_per_class_metrics)
         self._class_names: list[str] = []
         self._cat_id_to_name: dict[int, str] = {}
         self._f1_local: dict[int, dict[str, Any]] = init_matching_accumulator()
@@ -86,8 +93,7 @@ class COCOEvalCallback(Callback):
             class_metrics=True,
             max_detection_thresholds=[1, 10, self._max_dets],
         )
-        if self._segmentation:
-            kwargs["backend"] = "faster_coco_eval"
+        kwargs["backend"] = "faster_coco_eval"
         self.map_metric = MeanAveragePrecision(iou_type=iou_type, **kwargs)
 
     def on_fit_start(self, trainer: Any, pl_module: Any) -> None:
@@ -113,7 +119,16 @@ class COCOEvalCallback(Callback):
                 continue
             coco = getattr(dataset, "coco", None)
             if coco is not None and hasattr(coco, "cats"):
-                self._cat_id_to_name = {k: v["name"] for k, v in coco.cats.items()}
+                if hasattr(coco, "label2cat"):
+                    # remap_category_ids=True: dataset labels are 0-based contiguous
+                    # indices.  label2cat maps remapped_label → original_cat_id;
+                    # use it to build label → name so class IDs match predictions.
+                    self._cat_id_to_name = {
+                        label: coco.cats[cat_id]["name"] for label, cat_id in coco.label2cat.items()
+                    }
+                else:
+                    # Raw COCO category IDs used as labels (standard COCO dataset).
+                    self._cat_id_to_name = {k: v["name"] for k, v in coco.cats.items()}
                 return
         # Fallback: treat class_names as 0-based sequential labels.
         self._cat_id_to_name = {i: name for i, name in enumerate(self._class_names)}
@@ -155,6 +170,14 @@ class COCOEvalCallback(Callback):
             trainer: The PTL Trainer.
             pl_module: The LightningModule.
         """
+        if self._eval_interval > 1:
+            current_epoch = int(getattr(trainer, "current_epoch", 0)) + 1
+            max_epochs = getattr(trainer, "max_epochs", None)
+            is_last_epoch = isinstance(max_epochs, int) and max_epochs > 0 and current_epoch >= max_epochs
+            if current_epoch % self._eval_interval != 0 and not is_last_epoch:
+                self.map_metric.reset()
+                self._f1_local = init_matching_accumulator()
+                return
         self._compute_and_log(trainer, pl_module, "val")
 
     def on_test_batch_end(
@@ -232,12 +255,38 @@ class COCOEvalCallback(Callback):
         pl_module.log(f"{split}/mAP_50", metrics[f"{pfx}map_50"])
         pl_module.log(f"{split}/mAP_75", metrics[f"{pfx}map_75"])
         pl_module.log(f"{split}/mAR", metrics[mar_key])
+        if self._has_ema_callback(trainer):
+            # In PTL, validation runs with EMA weights when RFDETREMACallback is
+            # enabled, so emit explicit ema_* aliases for monitoring/logging.
+            pl_module.log(f"{split}/ema_mAP_50_95", metrics[f"{pfx}map"])
+            pl_module.log(f"{split}/ema_mAP_50", metrics[f"{pfx}map_50"])
+            pl_module.log(f"{split}/ema_mAR", metrics[mar_key])
+
+        # Write directly into callback_metrics so ModelCheckpoint / EarlyStopping
+        # read fresh values each epoch.  pl_module.log() from a callback's
+        # on_*_epoch_end goes only to logged_metrics (external loggers), not to
+        # callback_metrics, so checkpointing would see stale values otherwise.
+        trainer.callback_metrics[f"{split}/mAP_50_95"] = metrics[f"{pfx}map"].detach().cpu()
+        trainer.callback_metrics[f"{split}/mAP_50"] = metrics[f"{pfx}map_50"].detach().cpu()
+        trainer.callback_metrics[f"{split}/mAP_75"] = metrics[f"{pfx}map_75"].detach().cpu()
+        trainer.callback_metrics[f"{split}/mAR"] = metrics[mar_key].detach().cpu()
+        if self._has_ema_callback(trainer):
+            trainer.callback_metrics[f"{split}/ema_mAP_50_95"] = metrics[f"{pfx}map"].detach().cpu()
+            trainer.callback_metrics[f"{split}/ema_mAP_50"] = metrics[f"{pfx}map_50"].detach().cpu()
+            trainer.callback_metrics[f"{split}/ema_mAR"] = metrics[mar_key].detach().cpu()
 
         if self._segmentation:
             overall["segm mAP 50:95"] = float(metrics["segm_map"])
             overall["segm mAP 50"] = float(metrics["segm_map_50"])
             pl_module.log(f"{split}/segm_mAP_50_95", metrics["segm_map"])
             pl_module.log(f"{split}/segm_mAP_50", metrics["segm_map_50"])
+            trainer.callback_metrics[f"{split}/segm_mAP_50_95"] = metrics["segm_map"].detach().cpu()
+            trainer.callback_metrics[f"{split}/segm_mAP_50"] = metrics["segm_map_50"].detach().cpu()
+            if self._has_ema_callback(trainer):
+                pl_module.log(f"{split}/ema_segm_mAP_50_95", metrics["segm_map"])
+                pl_module.log(f"{split}/ema_segm_mAP_50", metrics["segm_map_50"])
+                trainer.callback_metrics[f"{split}/ema_segm_mAP_50_95"] = metrics["segm_map"].detach().cpu()
+                trainer.callback_metrics[f"{split}/ema_segm_mAP_50"] = metrics["segm_map_50"].detach().cpu()
 
         # F1 sweep — run first so per-class F1/prec/rec are available when
         # building the unified per-class table rows below.
@@ -256,6 +305,9 @@ class COCOEvalCallback(Callback):
             pl_module.log(f"{split}/F1", float(best["macro_f1"]))
             pl_module.log(f"{split}/precision", float(best["macro_precision"]))
             pl_module.log(f"{split}/recall", float(best["macro_recall"]))
+            trainer.callback_metrics[f"{split}/F1"] = torch.tensor(float(best["macro_f1"]))
+            trainer.callback_metrics[f"{split}/precision"] = torch.tensor(float(best["macro_precision"]))
+            trainer.callback_metrics[f"{split}/recall"] = torch.tensor(float(best["macro_recall"]))
             for k, cid in enumerate(sorted_ids):
                 f1_by_cid[cid] = {
                     "f1": float(best["per_class_f1"][k]),
@@ -269,6 +321,9 @@ class COCOEvalCallback(Callback):
             pl_module.log(f"{split}/F1", 0.0)
             pl_module.log(f"{split}/precision", 0.0)
             pl_module.log(f"{split}/recall", 0.0)
+            trainer.callback_metrics[f"{split}/F1"] = torch.tensor(0.0)
+            trainer.callback_metrics[f"{split}/precision"] = torch.tensor(0.0)
+            trainer.callback_metrics[f"{split}/recall"] = torch.tensor(0.0)
 
         # torchmetrics returns `classes` as a 0-d scalar when only one class is
         # present in the batch.  Ensure it is always 1-d before iterating.
@@ -290,24 +345,63 @@ class COCOEvalCallback(Callback):
         # Classes with no ground-truth annotations are skipped (pycocotools
         # returns -1 for AP and torchmetrics returns NaN for AR on such classes,
         # so they would show as all dashes in the table).
-        per_class: list[dict[str, Any]] = []
-        pc_key = f"{pfx}map_per_class"
-        if pc_key in metrics and "classes" in metrics:
-            for class_id, ap in zip(metrics["classes"], metrics[pc_key]):
-                ap_f = float(ap)
-                ar_f = ar_by_cid.get(int(class_id), float("nan"))
-                if ap_f < 0 and ar_f != ar_f:  # no ground-truth: skip ghost class
-                    continue
-                idx = int(class_id)
-                name = self._cat_id_to_name.get(idx, str(idx))
-                pl_module.log(f"{split}/AP/{name}", ap)
-                row: dict[str, Any] = {"name": name, "ap": ap_f, "ar": ar_f}
-                row.update(f1_by_cid.get(idx, {"f1": float("nan"), "precision": float("nan"), "recall": float("nan")}))
-                per_class.append(row)
+        per_class = self._build_per_class_rows(
+            metrics=metrics, pfx=pfx, split=split, pl_module=pl_module, ar_by_cid=ar_by_cid, f1_by_cid=f1_by_cid
+        )
 
         self._print_metrics_tables(trainer, split, overall, per_class)
         self.map_metric.reset()
         self._f1_local = init_matching_accumulator()
+
+    def _has_ema_callback(self, trainer: Any) -> bool:
+        """Return whether an EMA callback is present in the Trainer."""
+        for callback in getattr(trainer, "callbacks", []):
+            if callable(getattr(callback, "get_ema_model_state_dict", None)):
+                return True
+        return False
+
+    def _build_per_class_rows(
+        self,
+        metrics: dict[str, Any],
+        pfx: str,
+        split: str,
+        pl_module: Any,
+        ar_by_cid: dict[int, float],
+        f1_by_cid: dict[int, dict[str, float]],
+    ) -> list[dict[str, Any]]:
+        """Build per-class rows and emit per-class AP metrics.
+
+        Args:
+            metrics: Output of ``MeanAveragePrecision.compute()``.
+            pfx: Key prefix for bbox metrics when segmentation mode is enabled.
+            split: Metric namespace (``"val"`` or ``"test"``).
+            pl_module: LightningModule used for metric logging.
+            ar_by_cid: Per-class AR keyed by ``category_id``.
+            f1_by_cid: Per-class F1/precision/recall keyed by ``category_id``.
+
+        Returns:
+            Per-class rows for table rendering.
+        """
+        per_class: list[dict[str, Any]] = []
+        if not self._log_per_class_metrics:
+            return per_class
+
+        pc_key = f"{pfx}map_per_class"
+        if pc_key not in metrics or "classes" not in metrics:
+            return per_class
+
+        for class_id, ap in zip(metrics["classes"], metrics[pc_key]):
+            ap_f = float(ap)
+            ar_f = ar_by_cid.get(int(class_id), float("nan"))
+            if ap_f < 0 and (ar_f != ar_f or ar_f < 0):  # no ground-truth: skip ghost class
+                continue
+            idx = int(class_id)
+            name = self._cat_id_to_name.get(idx, str(idx))
+            pl_module.log(f"{split}/AP/{name}", ap)
+            row: dict[str, Any] = {"name": name, "ap": ap_f, "ar": ar_f}
+            row.update(f1_by_cid.get(idx, {"f1": float("nan"), "precision": float("nan"), "recall": float("nan")}))
+            per_class.append(row)
+        return per_class
 
     def _print_metrics_tables(
         self,

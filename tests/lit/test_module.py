@@ -166,6 +166,28 @@ class TestInit:
         assert module.model_config is mc
         assert module.train_config is tc
 
+    def test_compile_disabled_when_multi_scale_enabled(self, tmp_path):
+        """torch.compile is skipped when multi_scale=True (dynamic shapes)."""
+        mc = _base_model_config(compile=True)
+        tc = _base_train_config(tmp_path, multi_scale=True)
+        with (
+            patch("torch.cuda.is_available", return_value=True),
+            patch("rfdetr.lit.module.torch.compile") as mock_compile,
+        ):
+            _build_module(model_config=mc, train_config=tc, tmp_path=tmp_path)
+        mock_compile.assert_not_called()
+
+    def test_compile_runs_when_enabled_and_static_shapes(self, tmp_path):
+        """torch.compile runs when compile=True and multi_scale=False on CUDA."""
+        mc = _base_model_config(compile=True)
+        tc = _base_train_config(tmp_path, multi_scale=False)
+        with (
+            patch("torch.cuda.is_available", return_value=True),
+            patch("rfdetr.lit.module.torch.compile", side_effect=lambda m, **_: m) as mock_compile,
+        ):
+            _build_module(model_config=mc, train_config=tc, tmp_path=tmp_path)
+        mock_compile.assert_called_once()
+
 
 class TestLoadPretrainWeights:
     """Tests for _load_pretrain_weights() — covers checkpoint validation, detection-head
@@ -670,6 +692,21 @@ class TestValidationStep:
         val_loss_calls = [c for c in module.log.call_args_list if c[0][0] == "val/loss"]
         assert len(val_loss_calls) == 1
 
+    def test_can_disable_val_loss_computation(self, tmp_path):
+        """compute_val_loss=False skips criterion call and val/loss logging."""
+        tc = _base_train_config(tmp_path, compute_val_loss=False)
+        module, fake_model, fake_criterion, _ = _build_module(train_config=tc, tmp_path=tmp_path)
+        samples, targets = _make_batch()
+        fake_model.return_value = {}
+        module.log = MagicMock()
+
+        result = module.validation_step((samples, targets), batch_idx=0)
+
+        fake_criterion.assert_not_called()
+        logged_keys = [c[0][0] for c in module.log.call_args_list]
+        assert "val/loss" not in logged_keys
+        assert "results" in result and "targets" in result
+
 
 class TestTestStep:
     """Tests for test_step() — verifies output dict shape, postprocessor
@@ -733,6 +770,21 @@ class TestTestStep:
         logged_keys = [c[0][0] for c in module.log.call_args_list]
         assert "test/loss" in logged_keys
         assert "val/loss" not in logged_keys
+
+    def test_can_disable_test_loss_computation(self, tmp_path):
+        """compute_test_loss=False skips criterion call and test/loss logging."""
+        tc = _base_train_config(tmp_path, compute_test_loss=False)
+        module, fake_model, fake_criterion, _ = _build_module(train_config=tc, tmp_path=tmp_path)
+        samples, targets = _make_batch()
+        fake_model.return_value = {}
+        module.log = MagicMock()
+
+        result = module.test_step((samples, targets), batch_idx=0)
+
+        fake_criterion.assert_not_called()
+        logged_keys = [c[0][0] for c in module.log.call_args_list]
+        assert "test/loss" not in logged_keys
+        assert "results" in result and "targets" in result
 
 
 class TestConfigureOptimizers:

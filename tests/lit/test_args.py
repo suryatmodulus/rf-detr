@@ -35,7 +35,21 @@ class TestBuildArgsFromConfigs:
 
     def test_forwards_train_config_fields(self, base_model_config, base_train_config):
         """All key TrainConfig fields are faithfully mapped."""
-        tc = base_train_config(lr=3e-4, epochs=20, weight_decay=5e-5, batch_size=4, num_workers=0)
+        tc = base_train_config(
+            lr=3e-4,
+            epochs=20,
+            weight_decay=5e-5,
+            batch_size=4,
+            num_workers=0,
+            eval_interval=3,
+            log_per_class_metrics=False,
+            train_log_sync_dist=True,
+            train_log_on_step=True,
+            compute_val_loss=False,
+            compute_test_loss=False,
+            ema_update_interval=2,
+            prefetch_factor=4,
+        )
         args = _build_args_from_configs(base_model_config(), tc)
 
         assert args.lr == pytest.approx(3e-4)
@@ -43,6 +57,14 @@ class TestBuildArgsFromConfigs:
         assert args.weight_decay == pytest.approx(5e-5)
         assert args.batch_size == 4
         assert args.num_workers == 0
+        assert args.eval_interval == 3
+        assert args.log_per_class_metrics is False
+        assert args.train_log_sync_dist is True
+        assert args.train_log_on_step is True
+        assert args.compute_val_loss is False
+        assert args.compute_test_loss is False
+        assert args.ema_update_interval == 2
+        assert args.prefetch_factor == 4
 
     def test_forwards_dataset_fields(self, base_model_config, base_train_config):
         """Dataset-routing fields are forwarded to the Namespace."""

@@ -67,6 +67,16 @@ class TestBuildTrainerCallbacks:
         types = [type(cb) for cb in trainer.callbacks]
         assert COCOEvalCallback in types
 
+    def test_coco_eval_uses_eval_interval_and_per_class_flags(self, tmp_path):
+        """COCOEvalCallback receives eval_interval and log_per_class_metrics from TrainConfig."""
+        trainer = build_trainer(
+            _tc(tmp_path, use_ema=False, eval_interval=3, log_per_class_metrics=False),
+            _mc(),
+        )
+        coco_cb = next(cb for cb in trainer.callbacks if isinstance(cb, COCOEvalCallback))
+        assert coco_cb._eval_interval == 3
+        assert coco_cb._log_per_class_metrics is False
+
     def test_best_model_always_present(self, tmp_path):
         """BestModelCallback is always included."""
         trainer = build_trainer(_tc(tmp_path, use_ema=False), _mc())
@@ -78,6 +88,12 @@ class TestBuildTrainerCallbacks:
         trainer = build_trainer(_tc(tmp_path, use_ema=True), _mc())
         types = [type(cb) for cb in trainer.callbacks]
         assert RFDETREMACallback in types
+
+    def test_ema_callback_uses_update_interval(self, tmp_path):
+        """RFDETREMACallback receives ema_update_interval from TrainConfig."""
+        trainer = build_trainer(_tc(tmp_path, use_ema=True, ema_update_interval=4), _mc())
+        ema_cb = next(cb for cb in trainer.callbacks if isinstance(cb, RFDETREMACallback))
+        assert ema_cb._update_interval_steps == 4
 
     def test_no_ema_callback_when_use_ema_false(self, tmp_path):
         """RFDETREMACallback is absent when use_ema=False."""

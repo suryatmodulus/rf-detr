@@ -50,9 +50,20 @@ class RFDETRDataModule(LightningDataModule):
         self._dataset_test: Optional[torch.utils.data.Dataset] = None
 
         num_workers = self._args.num_workers
-        self._pin_memory: bool = torch.cuda.is_available()
-        self._persistent_workers: bool = num_workers > 0
-        self._prefetch_factor: Optional[int] = 2 if num_workers > 0 else None
+        self._pin_memory: bool = (
+            torch.cuda.is_available() if self.train_config.pin_memory is None else bool(self.train_config.pin_memory)
+        )
+        self._persistent_workers: bool = (
+            num_workers > 0
+            if self.train_config.persistent_workers is None
+            else bool(self.train_config.persistent_workers)
+        )
+        if num_workers > 0:
+            self._prefetch_factor = (
+                self.train_config.prefetch_factor if self.train_config.prefetch_factor is not None else 2
+            )
+        else:
+            self._prefetch_factor = None
 
     # ------------------------------------------------------------------
     # Helpers

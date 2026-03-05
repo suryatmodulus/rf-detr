@@ -215,6 +215,26 @@ class TestTrainConfigT42PromotedFields:
         """dont_save_weights defaults to False."""
         assert self._tc(tmp_path).dont_save_weights is False
 
+    def test_run_test_default_is_false(self, tmp_path):
+        """run_test defaults to False to avoid extra full-dataset test passes."""
+        assert self._tc(tmp_path).run_test is False
+
+    def test_eval_interval_default_is_one(self, tmp_path):
+        """eval_interval defaults to 1 (evaluate each epoch)."""
+        assert self._tc(tmp_path).eval_interval == 1
+
+    def test_ema_update_interval_default_is_one(self, tmp_path):
+        """ema_update_interval defaults to 1 (update every step)."""
+        assert self._tc(tmp_path).ema_update_interval == 1
+
+    def test_compute_val_loss_default_is_true(self, tmp_path):
+        """compute_val_loss defaults to True."""
+        assert self._tc(tmp_path).compute_val_loss is True
+
+    def test_compute_test_loss_default_is_true(self, tmp_path):
+        """compute_test_loss defaults to True."""
+        assert self._tc(tmp_path).compute_test_loss is True
+
     # --- promoted fields: accept explicit values ---
 
     @pytest.mark.parametrize(
@@ -227,6 +247,17 @@ class TestTrainConfigT42PromotedFields:
             pytest.param("lr_scheduler", "cosine", id="lr_scheduler_cosine"),
             pytest.param("lr_min_factor", 0.01, id="lr_min_factor"),
             pytest.param("dont_save_weights", True, id="dont_save_weights"),
+            pytest.param("run_test", True, id="run_test"),
+            pytest.param("eval_interval", 3, id="eval_interval"),
+            pytest.param("ema_update_interval", 4, id="ema_update_interval"),
+            pytest.param("compute_val_loss", False, id="compute_val_loss"),
+            pytest.param("compute_test_loss", False, id="compute_test_loss"),
+            pytest.param("train_log_sync_dist", True, id="train_log_sync_dist"),
+            pytest.param("train_log_on_step", True, id="train_log_on_step"),
+            pytest.param("log_per_class_metrics", False, id="log_per_class_metrics"),
+            pytest.param("prefetch_factor", 4, id="prefetch_factor"),
+            pytest.param("pin_memory", False, id="pin_memory"),
+            pytest.param("persistent_workers", False, id="persistent_workers"),
         ],
     )
     def test_promoted_field_accepts_explicit_value(self, tmp_path, field, value):
@@ -238,6 +269,19 @@ class TestTrainConfigT42PromotedFields:
         """lr_scheduler must reject values other than 'step' and 'cosine'."""
         with pytest.raises((ValueError, ValidationError)):
             self._tc(tmp_path, lr_scheduler="cyclic")
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            pytest.param("eval_interval", 0, id="eval_interval_zero"),
+            pytest.param("ema_update_interval", 0, id="ema_update_interval_zero"),
+            pytest.param("prefetch_factor", 0, id="prefetch_factor_zero"),
+        ],
+    )
+    def test_interval_and_prefetch_reject_non_positive_values(self, tmp_path, field, value):
+        """eval/EMA intervals and prefetch_factor must be >= 1 when provided."""
+        with pytest.raises((ValueError, ValidationError)):
+            self._tc(tmp_path, **{field: value})
 
 
 class TestBuildTrainerUsesRealFields:

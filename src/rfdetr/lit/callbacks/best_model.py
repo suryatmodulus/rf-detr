@@ -111,9 +111,17 @@ class BestModelCallback(ModelCheckpoint):
             raise RuntimeError("BestModelCallback._save_checkpoint called before pl_module was set.")
         pth_path = Path(filepath)
         pth_path.parent.mkdir(parents=True, exist_ok=True)
+        # Validation metrics are produced with EMA weights when the EMA callback
+        # is active, so save the same weight source to keep metric/checkpoint
+        # consistency for the monitored "regular" key.
+        model_state_dict = (
+            self._get_ema_model_state_dict(trainer, pl_module)
+            if self._monitor_ema is not None
+            else pl_module.model.state_dict()
+        )
         torch.save(
             {
-                "model": pl_module.model.state_dict(),
+                "model": model_state_dict,
                 "args": pl_module.train_config,
                 "epoch": trainer.current_epoch,
             },

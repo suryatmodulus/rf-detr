@@ -61,12 +61,21 @@ class RFDETRModule(LightningModule):
 
         # torch.compile is opt-out: set model_config.compile=False to disable.
         # Only enabled on CUDA; MPS and CPU do not benefit from compilation.
-        if model_config.compile and torch.cuda.is_available():
+        compile_enabled = model_config.compile and torch.cuda.is_available() and not train_config.multi_scale
+        if model_config.compile and train_config.multi_scale:
+            logger.info("Disabling torch.compile because multi_scale=True introduces dynamic input shapes.")
+        if compile_enabled:
             # dynamic=True: one compiled graph handles all multi-scale input sizes instead
             # of recompiling per (H, W) pair. suppress_errors=True: if inductor can't
             # compile a subgraph (e.g. bicubic backward with symbolic shapes), it falls
             # back to eager mode for that subgraph rather than crashing.
+            # capture_scalar_outputs=True: include Tensor.item() calls
+            # (gen_encoder_output_proposals / ms_deform_attn use spatial-shape .item()
+            # as Python slice indices). Safe with dynamic=True because item() results
+            # are backed symbols derived from input shapes — not unbacked symbols that
+            # would cause PendingUnbackedSymbolNotFound (which only occurs without dynamic).
             torch._dynamo.config.suppress_errors = True
+            torch._dynamo.config.capture_scalar_outputs = True
             self.model = torch.compile(self.model, dynamic=True)
 
     # ------------------------------------------------------------------
@@ -250,8 +259,24 @@ class RFDETRModule(LightningModule):
         # backward().  PTL accumulates full-scale gradients by default; dividing
         # here keeps the effective LR identical to the non-PTL training path.
         loss = loss / self.trainer.accumulate_grad_batches
-        self.log_dict({f"train/{k}": v for k, v in loss_dict.items()}, sync_dist=True, batch_size=batch_size)
-        self.log("train/loss", loss, prog_bar=True, sync_dist=True, batch_size=batch_size)
+        train_log_sync_dist = bool(self.train_config.train_log_sync_dist)
+        train_log_on_step = bool(self.train_config.train_log_on_step)
+        self.log_dict(
+            {f"train/{k}": v for k, v in loss_dict.items()},
+            on_step=train_log_on_step,
+            on_epoch=True,
+            sync_dist=train_log_sync_dist,
+            batch_size=batch_size,
+        )
+        self.log(
+            "train/loss",
+            loss,
+            prog_bar=True,
+            on_step=train_log_on_step,
+            on_epoch=True,
+            sync_dist=train_log_sync_dist,
+            batch_size=batch_size,
+        )
         return loss
 
     def validation_step(self, batch: Tuple, batch_idx: int) -> Dict[str, Any]:
@@ -269,10 +294,11 @@ class RFDETRModule(LightningModule):
         """
         samples, targets = batch
         outputs = self.model(samples)
-        loss_dict = self.criterion(outputs, targets)
-        weight_dict = self.criterion.weight_dict
-        loss = sum(loss_dict[k] * weight_dict[k] for k in loss_dict if k in weight_dict)
-        self.log("val/loss", loss, sync_dist=True, batch_size=len(targets))
+        if self.train_config.compute_val_loss:
+            loss_dict = self.criterion(outputs, targets)
+            weight_dict = self.criterion.weight_dict
+            loss = sum(loss_dict[k] * weight_dict[k] for k in loss_dict if k in weight_dict)
+            self.log("val/loss", loss, sync_dist=True, batch_size=len(targets))
 
         orig_sizes = torch.stack([t["orig_size"] for t in targets])
         results = self.postprocess(outputs, orig_sizes)
@@ -373,10 +399,11 @@ class RFDETRModule(LightningModule):
         """
         samples, targets = batch
         outputs = self.model(samples)
-        loss_dict = self.criterion(outputs, targets)
-        weight_dict = self.criterion.weight_dict
-        loss = sum(loss_dict[k] * weight_dict[k] for k in loss_dict if k in weight_dict)
-        self.log("test/loss", loss, sync_dist=True, batch_size=len(targets))
+        if self.train_config.compute_test_loss:
+            loss_dict = self.criterion(outputs, targets)
+            weight_dict = self.criterion.weight_dict
+            loss = sum(loss_dict[k] * weight_dict[k] for k in loss_dict if k in weight_dict)
+            self.log("test/loss", loss, sync_dist=True, batch_size=len(targets))
 
         orig_sizes = torch.stack([t["orig_size"] for t in targets])
         results = self.postprocess(outputs, orig_sizes)

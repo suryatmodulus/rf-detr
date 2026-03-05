@@ -51,6 +51,7 @@ dependencies = [
     "albumentations>=1.0.0,<2.0.0",
     "lightning>=2.6,<3",
     "torchmetrics[detection]>=1.2",
+    "faster-coco-eval>=1.7.2",
     "pyDeprecate>=0.3,<1"
 ]
 
@@ -83,7 +84,6 @@ tests = [
   "pytest-cov>=4,<8",
   "pytest-xdist>=3.6.1,<4",
   "pytest-rerunfailures>=10,<15",
-  "faster-coco-eval>=1.7",
   "jsonargparse[signatures]>=4.27.7",
 ]
 

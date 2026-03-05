@@ -141,6 +141,36 @@ class TestInit:
         assert dm._dataset_val is None
         assert dm._dataset_test is None
 
+    def test_prefetch_factor_defaults_to_two_when_workers_enabled(self, build_datamodule, base_train_config):
+        """prefetch_factor defaults to 2 for worker-based DataLoaders."""
+        tc = base_train_config(num_workers=2, prefetch_factor=None)
+        dm = build_datamodule(train_config=tc)
+        assert dm._prefetch_factor == 2
+
+    def test_prefetch_factor_honors_train_config(self, build_datamodule, base_train_config):
+        """prefetch_factor from TrainConfig is forwarded when workers are enabled."""
+        tc = base_train_config(num_workers=2, prefetch_factor=5)
+        dm = build_datamodule(train_config=tc)
+        assert dm._prefetch_factor == 5
+
+    def test_prefetch_factor_none_when_workers_disabled(self, build_datamodule, base_train_config):
+        """prefetch_factor is None when num_workers == 0."""
+        tc = base_train_config(num_workers=0, prefetch_factor=5)
+        dm = build_datamodule(train_config=tc)
+        assert dm._prefetch_factor is None
+
+    def test_pin_memory_override_is_respected(self, build_datamodule, base_train_config):
+        """pin_memory can be explicitly overridden from TrainConfig."""
+        tc = base_train_config(pin_memory=False)
+        dm = build_datamodule(train_config=tc)
+        assert dm._pin_memory is False
+
+    def test_persistent_workers_override_is_respected(self, build_datamodule, base_train_config):
+        """persistent_workers can be explicitly overridden from TrainConfig."""
+        tc = base_train_config(num_workers=2, persistent_workers=False)
+        dm = build_datamodule(train_config=tc)
+        assert dm._persistent_workers is False
+
 
 class TestSetup:
     """setup(stage) builds the correct dataset(s) for each PTL stage."""

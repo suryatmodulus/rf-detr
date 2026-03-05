@@ -131,6 +131,27 @@ class TestBestModelCallback:
         checkpoint = torch.load(tmp_path / "checkpoint_best_ema.pth", map_location="cpu", weights_only=False)
         assert checkpoint["model"] == ema_state
 
+    def test_regular_checkpoint_uses_ema_weights_when_ema_enabled(self, tmp_path: Path) -> None:
+        """Regular checkpoint must store EMA-evaluated weights when EMA is enabled."""
+        cb = BestModelCallback(
+            output_dir=str(tmp_path),
+            monitor_ema="val/ema_mAP_50_95",
+        )
+        ema_state = {"w": torch.ones(1)}
+        ema_callback = MagicMock()
+        ema_callback.get_ema_model_state_dict.return_value = ema_state
+        trainer = _make_trainer(
+            {"val/mAP_50_95": 0.6, "val/ema_mAP_50_95": 0.6},
+            callbacks=[ema_callback],
+        )
+        pl_module = _make_pl_module()
+        pl_module.model.state_dict.return_value = {"w": torch.zeros(1)}
+
+        cb.on_validation_end(trainer, pl_module)
+
+        checkpoint = torch.load(tmp_path / "checkpoint_best_regular.pth", map_location="cpu", weights_only=False)
+        assert checkpoint["model"] == ema_state
+
     def test_best_total_regular_wins(self, tmp_path: Path) -> None:
         """Regular model wins when best_regular > best_ema."""
         cb = BestModelCallback(

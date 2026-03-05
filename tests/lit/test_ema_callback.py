@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import math
 import warnings
+from unittest.mock import MagicMock
 
 import pytest
 import torch
@@ -149,3 +150,21 @@ class TestInit:
         assert state is not None
         assert "weight" in state
         assert "bias" in state
+
+
+class TestUpdateInterval:
+    """Verify update_interval_steps throttles EMA updates on step hooks."""
+
+    def test_updates_only_on_interval_steps(self) -> None:
+        """update_interval_steps=2 updates on steps 2, 4, ... only."""
+        cb = RFDETREMACallback(update_interval_steps=2)
+        cb._average_model = MagicMock()
+
+        trainer = MagicMock()
+        pl_module = MagicMock()
+
+        for step in (1, 2, 3, 4):
+            trainer.global_step = step
+            cb.on_train_batch_end(trainer, pl_module, outputs=None, batch=None, batch_idx=step - 1)
+
+        assert cb._average_model.update_parameters.call_count == 2

@@ -32,13 +32,21 @@ class RFDETREMACallback(Callback):
             ``decay * (1 - exp(-updates / tau))``. Corresponds to
             ``TrainConfig.ema_tau``.
         use_buffers: Whether buffers are averaged in addition to parameters.
+        update_interval_steps: Update EMA every N optimizer steps.
     """
 
-    def __init__(self, decay: float = 0.993, tau: int = 100, use_buffers: bool = True) -> None:
+    def __init__(
+        self,
+        decay: float = 0.993,
+        tau: int = 100,
+        use_buffers: bool = True,
+        update_interval_steps: int = 1,
+    ) -> None:
         super().__init__()
         self._decay = decay
         self._tau = tau
         self._use_buffers = use_buffers
+        self._update_interval_steps = max(1, int(update_interval_steps))
 
         self._average_model: Optional[AveragedModel] = None
         self._latest_update_step = 0
@@ -139,9 +147,13 @@ class RFDETREMACallback(Callback):
         if self._average_model is None:
             return
         step_idx = trainer.global_step - 1
-        if trainer.global_step > self._latest_update_step and self.should_update(step_idx=step_idx):
+        if trainer.global_step <= self._latest_update_step:
+            return
+
+        self._latest_update_step = trainer.global_step
+        should_update_step = trainer.global_step % self._update_interval_steps == 0
+        if should_update_step and self.should_update(step_idx=step_idx):
             self._average_model.update_parameters(pl_module)
-            self._latest_update_step = trainer.global_step
 
     def on_train_epoch_end(self, trainer: Trainer, pl_module: LightningModule) -> None:
         """Optionally update EMA at epoch boundaries."""

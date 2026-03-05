@@ -109,7 +109,13 @@ def build_trainer(
     callbacks = []
 
     if enable_ema:
-        callbacks.append(RFDETREMACallback(decay=tc.ema_decay, tau=tc.ema_tau))
+        callbacks.append(
+            RFDETREMACallback(
+                decay=tc.ema_decay,
+                tau=tc.ema_tau,
+                update_interval_steps=tc.ema_update_interval,
+            )
+        )
 
     # Drop-path / dropout scheduling (vit_encoder_num_layers defaults to 12).
     if tc.drop_path > 0.0:
@@ -120,6 +126,8 @@ def build_trainer(
         COCOEvalCallback(
             max_dets=tc.eval_max_dets,
             segmentation=model_config.segmentation_head,
+            eval_interval=tc.eval_interval,
+            log_per_class_metrics=tc.log_per_class_metrics,
         )
     )
 

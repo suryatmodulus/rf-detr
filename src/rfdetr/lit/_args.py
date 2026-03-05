@@ -97,4 +97,12 @@ def _build_args_from_configs(model_config: ModelConfig, train_config: TrainConfi
         # Evaluation extras — not in populate_args' named parameters but
         # accepted via **extra_kwargs and forwarded into argparse.Namespace.
         eval_max_dets=tc.eval_max_dets,
+        eval_interval=tc.eval_interval,
+        log_per_class_metrics=tc.log_per_class_metrics,
+        compute_val_loss=tc.compute_val_loss,
+        compute_test_loss=tc.compute_test_loss,
+        ema_update_interval=tc.ema_update_interval,
+        train_log_sync_dist=tc.train_log_sync_dist,
+        train_log_on_step=tc.train_log_on_step,
+        prefetch_factor=tc.prefetch_factor,
     )

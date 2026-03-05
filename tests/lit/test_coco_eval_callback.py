@@ -24,10 +24,11 @@ def _make_pl_module() -> MagicMock:
     return MagicMock(name="pl_module")
 
 
-def _make_trainer(datamodule=None) -> MagicMock:
+def _make_trainer(datamodule=None, callbacks: list[object] | None = None) -> MagicMock:
     """Return a minimal mock Trainer with an optional DataModule."""
     trainer = MagicMock(name="trainer")
     trainer.datamodule = datamodule
+    trainer.callbacks = callbacks or []
     return trainer
 
 
@@ -103,6 +104,18 @@ class TestSetup:
         cb.setup(trainer, module, stage="validate")
         assert cb.map_metric is not first
 
+    def test_detection_uses_faster_coco_eval_backend(self) -> None:
+        """Detection mode always uses faster_coco_eval backend to avoid map=-1 bug."""
+        cb = COCOEvalCallback(segmentation=False)
+        cb.setup(_make_trainer(), _make_pl_module(), stage="fit")
+        assert cb.map_metric._coco_backend.backend == "faster_coco_eval"
+
+    def test_segmentation_uses_faster_coco_eval_backend(self) -> None:
+        """Segmentation mode always uses faster_coco_eval backend."""
+        cb = COCOEvalCallback(segmentation=True)
+        cb.setup(_make_trainer(), _make_pl_module(), stage="fit")
+        assert cb.map_metric._coco_backend.backend == "faster_coco_eval"
+
 
 class TestOnFitStart:
     """on_fit_start() populates class names from the datamodule."""
@@ -128,6 +141,38 @@ class TestOnFitStart:
         cb = COCOEvalCallback()
         cb.on_fit_start(_make_trainer(datamodule=dm), _make_pl_module())
         assert cb._class_names == []
+
+    def test_cat_id_to_name_uses_label2cat_when_available(self) -> None:
+        """When coco.label2cat is present (remap_category_ids=True) the mapping
+        uses 0-based remapped label IDs so class names align with predictions."""
+        coco = MagicMock()
+        coco.cats = {1: {"name": "fish"}, 2: {"name": "shark"}}
+        # label2cat: remapped_label → original_cat_id  (cat2label inverse)
+        coco.label2cat = {0: 1, 1: 2}
+        dataset = MagicMock()
+        dataset.coco = coco
+        dm = MagicMock()
+        dm.class_names = ["fish", "shark"]
+        dm._dataset_val = dataset
+        dm._dataset_train = None
+        cb = COCOEvalCallback()
+        cb.on_fit_start(_make_trainer(datamodule=dm), _make_pl_module())
+        # 0-based label indices must map to names, not original cat IDs
+        assert cb._cat_id_to_name == {0: "fish", 1: "shark"}
+
+    def test_cat_id_to_name_falls_back_to_raw_cats_without_label2cat(self) -> None:
+        """Without coco.label2cat (standard COCO), original category IDs are used."""
+        coco = MagicMock(spec=["cats"])  # no label2cat attribute
+        coco.cats = {1: {"name": "fish"}, 2: {"name": "shark"}}
+        dataset = MagicMock()
+        dataset.coco = coco
+        dm = MagicMock()
+        dm.class_names = ["fish", "shark"]
+        dm._dataset_val = dataset
+        dm._dataset_train = None
+        cb = COCOEvalCallback()
+        cb.on_fit_start(_make_trainer(datamodule=dm), _make_pl_module())
+        assert cb._cat_id_to_name == {1: "fish", 2: "shark"}
 
 
 class TestOnValidationBatchEnd:
@@ -215,6 +260,24 @@ class TestOnValidationEpochEnd:
         assert "val/mAP_50" in logged_keys
         assert "val/mAP_75" in logged_keys
         assert "val/mAR" in logged_keys
+
+    def test_ema_metric_aliases_logged_when_ema_callback_present(self) -> None:
+        """val/ema_* aliases are emitted when EMA callback is present."""
+        cb = COCOEvalCallback(max_dets=500)
+        ema_cb = MagicMock(name="ema_cb")
+        ema_cb.get_ema_model_state_dict = MagicMock(return_value={"w": torch.zeros(1)})
+        trainer = _make_trainer(callbacks=[ema_cb])
+        cb.setup(trainer, _make_pl_module(), stage="fit")
+        cb.map_metric = MagicMock(name="map_metric")
+        cb.map_metric.compute.return_value = self._minimal_metrics()
+        module = _make_pl_module()
+
+        cb.on_validation_epoch_end(trainer, module)
+
+        logged_keys = {c.args[0] for c in module.log.call_args_list}
+        assert "val/ema_mAP_50_95" in logged_keys
+        assert "val/ema_mAP_50" in logged_keys
+        assert "val/ema_mAR" in logged_keys
 
     def test_f1_metrics_logged_when_gt_present(self) -> None:
         """val/F1, val/precision, val/recall are logged when GT exists."""
@@ -323,6 +386,124 @@ class TestOnValidationEpochEnd:
 
         logged_keys = {c.args[0] for c in module.log.call_args_list}
         assert "val/AP/3" in logged_keys
+
+    def test_eval_interval_skips_non_matching_epochs(self) -> None:
+        """Validation metric computation is skipped on non-interval epochs."""
+        cb = COCOEvalCallback(eval_interval=3)
+        trainer = _make_trainer()
+        trainer.current_epoch = 0  # epoch 1 (1-based) is not divisible by 3
+        trainer.max_epochs = 10
+        cb.setup(trainer, _make_pl_module(), stage="fit")
+        cb.map_metric = MagicMock(name="map_metric")
+        cb.map_metric.compute.return_value = self._minimal_metrics()
+        module = _make_pl_module()
+
+        cb.on_validation_epoch_end(trainer, module)
+
+        cb.map_metric.compute.assert_not_called()
+        cb.map_metric.reset.assert_called_once()
+        module.log.assert_not_called()
+
+    def test_eval_interval_runs_on_matching_epochs(self) -> None:
+        """Validation metric computation runs on interval-aligned epochs."""
+        cb = COCOEvalCallback(eval_interval=3)
+        trainer = _make_trainer()
+        trainer.current_epoch = 2  # epoch 3 (1-based) is divisible by 3
+        trainer.max_epochs = 10
+        cb.setup(trainer, _make_pl_module(), stage="fit")
+        cb.map_metric = MagicMock(name="map_metric")
+        cb.map_metric.compute.return_value = self._minimal_metrics()
+        module = _make_pl_module()
+
+        cb.on_validation_epoch_end(trainer, module)
+
+        cb.map_metric.compute.assert_called_once()
+        logged_keys = {c.args[0] for c in module.log.call_args_list}
+        assert "val/mAP_50" in logged_keys
+
+    def test_per_class_ap_can_be_disabled(self) -> None:
+        """log_per_class_metrics=False suppresses val/AP/<class> logging."""
+        cb = COCOEvalCallback(log_per_class_metrics=False)
+        cb._class_names = ["cat", "dog"]
+        cb._cat_id_to_name = {0: "cat", 1: "dog"}
+        cb.setup(_make_trainer(), _make_pl_module(), stage="fit")
+        cb.map_metric = MagicMock(name="map_metric")
+        metrics = self._minimal_metrics()
+        metrics["map_per_class"] = torch.tensor([0.5, 0.4])
+        metrics["classes"] = torch.tensor([0, 1])
+        cb.map_metric.compute.return_value = metrics
+        module = _make_pl_module()
+
+        cb.on_validation_epoch_end(_make_trainer(), module)
+
+        logged_keys = {c.args[0] for c in module.log.call_args_list}
+        assert not any(k.startswith("val/AP/") for k in logged_keys)
+
+    def test_callback_metrics_updated_for_model_checkpoint(self) -> None:
+        """Core metrics written to trainer.callback_metrics each epoch so
+        ModelCheckpoint / BestModelCallback detect improvement.
+
+        pl_module.log() from a callback's on_validation_epoch_end goes only to
+        logged_metrics (external loggers), not callback_metrics.
+        """
+        cb = COCOEvalCallback(max_dets=500)
+        trainer = _make_trainer()
+        trainer.callback_metrics = {}
+        cb.setup(trainer, _make_pl_module(), stage="fit")
+        cb.map_metric = MagicMock(name="map_metric")
+        cb.map_metric.compute.return_value = self._minimal_metrics()
+
+        cb.on_validation_epoch_end(trainer, _make_pl_module())
+
+        assert "val/mAP_50_95" in trainer.callback_metrics
+        assert "val/mAP_50" in trainer.callback_metrics
+        assert "val/mAP_75" in trainer.callback_metrics
+        assert "val/mAR" in trainer.callback_metrics
+        assert trainer.callback_metrics["val/mAP_50_95"].item() == pytest.approx(0.4)
+        assert trainer.callback_metrics["val/mAP_50"].item() == pytest.approx(0.6)
+
+    def test_callback_metrics_updated_with_ema_aliases(self) -> None:
+        """EMA alias metrics are written to callback_metrics when EMA callback is present."""
+        cb = COCOEvalCallback(max_dets=500)
+        ema_cb = MagicMock(name="ema_cb")
+        ema_cb.get_ema_model_state_dict = MagicMock(return_value={"w": torch.zeros(1)})
+        trainer = _make_trainer(callbacks=[ema_cb])
+        trainer.callback_metrics = {}
+        cb.setup(trainer, _make_pl_module(), stage="fit")
+        cb.map_metric = MagicMock(name="map_metric")
+        cb.map_metric.compute.return_value = self._minimal_metrics()
+
+        cb.on_validation_epoch_end(trainer, _make_pl_module())
+
+        assert "val/ema_mAP_50_95" in trainer.callback_metrics
+        assert "val/ema_mAP_50" in trainer.callback_metrics
+        assert "val/ema_mAR" in trainer.callback_metrics
+
+    def test_ghost_class_with_negative_ar_sentinel_is_filtered(self) -> None:
+        """A class where both ap=-1 and ar=-1 (negative sentinels, not NaN) must
+        be excluded from the per-class table.  The old filter checked for NaN
+        only, so ar=-1 (a valid float) escaped the guard."""
+        cb = COCOEvalCallback()
+        cb._cat_id_to_name = {0: "fish"}
+        trainer = _make_trainer()
+        trainer.callback_metrics = {}
+        cb.setup(trainer, _make_pl_module(), stage="fit")
+        cb.map_metric = MagicMock(name="map_metric")
+        metrics = self._minimal_metrics()
+        # class 0 is a real class; class 8 is a ghost with both sentinels = -1
+        metrics["map_per_class"] = torch.tensor([0.5, -1.0])
+        metrics["classes"] = torch.tensor([0, 8])
+        # ar=-1 for ghost (negative sentinel, not NaN)
+        metrics["mar_500_per_class"] = torch.tensor([0.6, -1.0])
+        cb.map_metric.compute.return_value = metrics
+        module = _make_pl_module()
+
+        cb.on_validation_epoch_end(trainer, module)
+
+        logged_keys = {c.args[0] for c in module.log.call_args_list}
+        # real class logged, ghost class suppressed
+        assert "val/AP/fish" in logged_keys
+        assert "val/AP/8" not in logged_keys
 
 
 class TestConvertTargets:
@@ -498,6 +679,24 @@ class TestOnTestEpochEnd:
         assert "test/mAP_50" in logged_keys
         assert "test/mAP_75" in logged_keys
         assert "test/mAR" in logged_keys
+
+    def test_ema_metric_aliases_logged_when_ema_callback_present(self) -> None:
+        """test/ema_* aliases are emitted when EMA callback is present."""
+        cb = COCOEvalCallback(max_dets=500)
+        ema_cb = MagicMock(name="ema_cb")
+        ema_cb.get_ema_model_state_dict = MagicMock(return_value={"w": torch.zeros(1)})
+        trainer = _make_trainer(callbacks=[ema_cb])
+        cb.setup(trainer, _make_pl_module(), stage="test")
+        cb.map_metric = MagicMock(name="map_metric")
+        cb.map_metric.compute.return_value = self._minimal_metrics()
+        module = _make_pl_module()
+
+        cb.on_test_epoch_end(trainer, module)
+
+        logged_keys = {c.args[0] for c in module.log.call_args_list}
+        assert "test/ema_mAP_50_95" in logged_keys
+        assert "test/ema_mAP_50" in logged_keys
+        assert "test/ema_mAR" in logged_keys
 
     def test_val_prefix_not_logged(self) -> None:
         """test_epoch_end must not emit val/ keys — prefixes must not bleed across loops."""

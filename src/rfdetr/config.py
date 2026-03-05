@@ -315,6 +315,7 @@ class TrainConfig(BaseModel):
     expanded_scales: bool = True
     do_random_resize_via_padding: bool = False
     use_ema: bool = True
+    ema_update_interval: int = 1
     num_workers: int = 2
     weight_decay: float = 1e-4
     early_stopping: bool = False
@@ -329,9 +330,11 @@ class TrainConfig(BaseModel):
     project: Optional[str] = None
     run: Optional[str] = None
     class_names: List[str] = None
-    run_test: bool = True
+    run_test: bool = False
     segmentation_head: bool = False
     eval_max_dets: int = 500
+    eval_interval: int = 1
+    log_per_class_metrics: bool = True
     aug_config: Optional[Dict[str, Any]] = None
     # Promoted from populate_args() — PTL migration (T4-2).
     # device is intentionally absent: PTL auto-detects accelerator via Trainer(accelerator="auto").
@@ -342,6 +345,30 @@ class TrainConfig(BaseModel):
     lr_scheduler: Literal["step", "cosine"] = "step"
     lr_min_factor: float = 0.0
     dont_save_weights: bool = False
+    # PTL runtime/perf tuning knobs.
+    train_log_sync_dist: bool = False
+    train_log_on_step: bool = False
+    compute_val_loss: bool = True
+    compute_test_loss: bool = True
+    pin_memory: Optional[bool] = None
+    persistent_workers: Optional[bool] = None
+    prefetch_factor: Optional[int] = None
+
+    @field_validator("ema_update_interval", "eval_interval", mode="after")
+    @classmethod
+    def validate_positive_intervals(cls, v: int) -> int:
+        """Validate interval fields are >= 1."""
+        if v < 1:
+            raise ValueError("Interval fields must be >= 1.")
+        return v
+
+    @field_validator("prefetch_factor", mode="after")
+    @classmethod
+    def validate_prefetch_factor(cls, v: Optional[int]) -> Optional[int]:
+        """Validate prefetch_factor is None or >= 1."""
+        if v is not None and v < 1:
+            raise ValueError("prefetch_factor must be >= 1 when provided.")
+        return v
 
     @field_validator("dataset_dir", "output_dir", mode="after")
     @classmethod
