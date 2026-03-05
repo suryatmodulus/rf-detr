@@ -67,6 +67,8 @@ class ModelConfig(BaseConfig):
     resolution: int
     group_detr: int = 13
     gradient_checkpointing: bool = False
+    compile: bool = True
+    fused_optimizer: bool = True
     positional_encoding_size: int
     ia_bce_loss: bool = True
     cls_loss_coef: float = 1.0

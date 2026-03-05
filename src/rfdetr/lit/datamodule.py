@@ -49,6 +49,11 @@ class RFDETRDataModule(LightningDataModule):
         self._dataset_val: Optional[torch.utils.data.Dataset] = None
         self._dataset_test: Optional[torch.utils.data.Dataset] = None
 
+        num_workers = self._args.num_workers
+        self._pin_memory: bool = torch.cuda.is_available()
+        self._persistent_workers: bool = num_workers > 0
+        self._prefetch_factor: Optional[int] = 2 if num_workers > 0 else None
+
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
@@ -124,6 +129,9 @@ class RFDETRDataModule(LightningDataModule):
                 sampler=sampler,
                 collate_fn=collate_fn,
                 num_workers=args.num_workers,
+                pin_memory=self._pin_memory,
+                persistent_workers=self._persistent_workers,
+                prefetch_factor=self._prefetch_factor,
             )
 
         batch_sampler = torch.utils.data.BatchSampler(
@@ -136,6 +144,9 @@ class RFDETRDataModule(LightningDataModule):
             batch_sampler=batch_sampler,
             collate_fn=collate_fn,
             num_workers=args.num_workers,
+            pin_memory=self._pin_memory,
+            persistent_workers=self._persistent_workers,
+            prefetch_factor=self._prefetch_factor,
         )
 
     def val_dataloader(self) -> DataLoader:
@@ -152,6 +163,9 @@ class RFDETRDataModule(LightningDataModule):
             drop_last=False,
             collate_fn=collate_fn,
             num_workers=args.num_workers,
+            pin_memory=self._pin_memory,
+            persistent_workers=self._persistent_workers,
+            prefetch_factor=self._prefetch_factor,
         )
 
     def test_dataloader(self) -> DataLoader:
@@ -168,6 +182,9 @@ class RFDETRDataModule(LightningDataModule):
             drop_last=False,
             collate_fn=collate_fn,
             num_workers=args.num_workers,
+            pin_memory=self._pin_memory,
+            persistent_workers=self._persistent_workers,
+            prefetch_factor=self._prefetch_factor,
         )
 
     # ------------------------------------------------------------------

@@ -59,6 +59,16 @@ class RFDETRModule(LightningModule):
             self._apply_lora()
         self.criterion, self.postprocess = build_criterion_and_postprocessors(self._args)
 
+        # torch.compile is opt-out: set model_config.compile=False to disable.
+        # Only enabled on CUDA; MPS and CPU do not benefit from compilation.
+        if model_config.compile and torch.cuda.is_available():
+            # dynamic=True: one compiled graph handles all multi-scale input sizes instead
+            # of recompiling per (H, W) pair. suppress_errors=True: if inductor can't
+            # compile a subgraph (e.g. bicubic backward with symbolic shapes), it falls
+            # back to eager mode for that subgraph rather than crashing.
+            torch._dynamo.config.suppress_errors = True
+            self.model = torch.compile(self.model, dynamic=True)
+
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
@@ -207,8 +217,9 @@ class RFDETRModule(LightningModule):
             Batch with all tensors on ``device``.
         """
         samples, targets = batch
-        samples = samples.to(device)
-        targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
+        non_blocking = device.type == "cuda"
+        samples = samples.to(device, non_blocking=non_blocking)
+        targets = [{k: v.to(device, non_blocking=non_blocking) for k, v in t.items()} for t in targets]
         return samples, targets
 
     def training_step(self, batch: Tuple, batch_idx: int) -> torch.Tensor:
@@ -216,7 +227,10 @@ class RFDETRModule(LightningModule):
 
         PTL handles gradient accumulation (``accumulate_grad_batches``), AMP
         (``precision``), and gradient clipping (``gradient_clip_val``) — no
-        manual ``GradScaler`` or loss scaling here.
+        manual ``GradScaler`` or loss scaling here.  The loss is divided by
+        ``trainer.accumulate_grad_batches`` so that the accumulated gradient
+        magnitude matches the legacy engine (which scales each sub-batch by
+        ``1/grad_accum_steps`` before calling ``backward()``).
 
         Args:
             batch: Tuple of (NestedTensor samples, list of target dicts).
@@ -231,6 +245,11 @@ class RFDETRModule(LightningModule):
         loss_dict = self.criterion(outputs, targets)
         weight_dict = self.criterion.weight_dict
         loss = sum(loss_dict[k] * weight_dict[k] for k in loss_dict if k in weight_dict)
+        # Normalise by grad-accum steps so the accumulated gradient matches the
+        # legacy engine, which scales each sub-batch by 1/grad_accum_steps before
+        # backward().  PTL accumulates full-scale gradients by default; dividing
+        # here keeps the effective LR identical to the non-PTL training path.
+        loss = loss / self.trainer.accumulate_grad_batches
         self.log_dict({f"train/{k}": v for k, v in loss_dict.items()}, sync_dist=True, batch_size=batch_size)
         self.log("train/loss", loss, prog_bar=True, sync_dist=True, batch_size=batch_size)
         return loss
@@ -272,9 +291,19 @@ class RFDETRModule(LightningModule):
         args = self._args
         tc = self.train_config
 
-        param_dicts = get_param_dict(args, self.model)
+        # Unwrap torch.compile's OptimizedModule so get_param_dict sees the
+        # original module's named_parameters() — compiled wrapper can cause
+        # name-prefix mismatches that put the same tensor in multiple groups.
+        model_for_params = getattr(self.model, "_orig_mod", self.model)
+        param_dicts = get_param_dict(args, model_for_params)
         param_dicts = [p for p in param_dicts if p["params"].requires_grad]
-        optimizer = torch.optim.AdamW(param_dicts, lr=tc.lr, weight_decay=tc.weight_decay)
+        use_fused = self.model_config.fused_optimizer and torch.cuda.is_available() and torch.cuda.is_bf16_supported()
+        optimizer = torch.optim.AdamW(
+            param_dicts,
+            lr=tc.lr,
+            weight_decay=tc.weight_decay,
+            fused=use_fused,
+        )
 
         total_steps = int(self.trainer.estimated_stepping_batches)
         steps_per_epoch = max(1, total_steps // tc.epochs)
@@ -296,6 +325,37 @@ class RFDETRModule(LightningModule):
             "optimizer": optimizer,
             "lr_scheduler": {"scheduler": scheduler, "interval": "step"},
         }
+
+    def clip_gradients(
+        self,
+        optimizer: torch.optim.Optimizer,
+        gradient_clip_val: Optional[float] = None,
+        gradient_clip_algorithm: Optional[str] = None,
+    ) -> None:
+        """Override PTL gradient clipping to support fused AdamW.
+
+        PTL's AMP precision plugin refuses to clip gradients when the optimizer
+        declares it handles unscaling internally (fused=True).  When fused is
+        active we are on BF16 (no GradScaler) so ``clip_grad_norm_`` is
+        correct.  For the non-fused path (FP16 + GradScaler or FP32) we
+        delegate to ``super()`` to preserve scaler-aware unscaling.
+
+        Args:
+            optimizer: The current optimizer.
+            gradient_clip_val: Maximum gradient norm.
+            gradient_clip_algorithm: Clipping algorithm; forwarded to super()
+                for the non-fused path.
+        """
+        use_fused = self.model_config.fused_optimizer and torch.cuda.is_available() and torch.cuda.is_bf16_supported()
+        if use_fused:
+            if gradient_clip_val and gradient_clip_val > 0:
+                torch.nn.utils.clip_grad_norm_(self.parameters(), gradient_clip_val)
+        else:
+            super().clip_gradients(
+                optimizer,
+                gradient_clip_val=gradient_clip_val,
+                gradient_clip_algorithm=gradient_clip_algorithm,
+            )
 
     def test_step(self, batch: Tuple, batch_idx: int) -> Dict[str, Any]:
         """Run forward pass and postprocess for one test step.

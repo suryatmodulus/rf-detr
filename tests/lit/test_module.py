@@ -555,7 +555,7 @@ class TestTrainingStep:
     under the train/ prefix, prog_bar visibility, scalar tensor output, and that losses
     absent from weight_dict are excluded from the total."""
 
-    def _run_step(self, tmp_path, loss_dict=None, weight_dict=None):
+    def _run_step(self, tmp_path, loss_dict=None, weight_dict=None, accumulate_grad_batches=1):
         module, fake_model, fake_criterion, _ = _build_module(tmp_path=tmp_path)
         samples, targets = _make_batch()
         fake_model.return_value = {}
@@ -563,6 +563,10 @@ class TestTrainingStep:
         fake_criterion.weight_dict = weight_dict or {"loss_ce": 1.0}
         module.log = MagicMock()
         module.log_dict = MagicMock()
+        trainer = MagicMock()
+        trainer.accumulate_grad_batches = accumulate_grad_batches
+        module._trainer = trainer
+        type(module).trainer = property(lambda self: self._trainer)
         return module, samples, targets, fake_model, fake_criterion
 
     def test_returns_weighted_loss_sum(self, tmp_path):
@@ -574,6 +578,16 @@ class TestTrainingStep:
         loss = module.training_step((samples, targets), batch_idx=0)
 
         assert loss.item() == pytest.approx(1.0 + 10.0 + 6.0)
+
+    def test_loss_normalised_by_accum_steps(self, tmp_path):
+        """Loss must be divided by accumulate_grad_batches to match legacy engine scaling."""
+        loss_dict = {"loss_ce": torch.tensor(4.0)}
+        weight_dict = {"loss_ce": 1.0}
+        module, samples, targets, _, _ = self._run_step(tmp_path, loss_dict, weight_dict, accumulate_grad_batches=4)
+
+        loss = module.training_step((samples, targets), batch_idx=0)
+
+        assert loss.item() == pytest.approx(1.0)  # 4.0 / 4
 
     def test_logs_train_loss_to_prog_bar(self, tmp_path):
         """Aggregate training loss must be logged with prog_bar=True for visibility."""

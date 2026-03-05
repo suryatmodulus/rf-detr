@@ -80,11 +80,16 @@ def build_trainer(
     def _resolve_precision() -> str:
         if not model_config.amp:
             return "32-true"
-        if torch.cuda.is_available() or torch.backends.mps.is_available():
-            # TODO: switch to "bf16-mixed" once we validate training stability from
-            # scratch and verify that numpy conversion sites cast to float32 first.
-            # bf16 has only 7 mantissa bits — gradients underflow when training from
-            # random init, so we fall back to fp16-mixed (which uses GradScaler).
+        if torch.cuda.is_available():
+            # Ampere+ GPUs support bf16-mixed which is scaler-free —
+            # no GradScaler.scale/unscale/update overhead per optimizer step.
+            # BF16 is safe for fine-tuning (pretrained weights loaded by default).
+            # Training from random init with very small LR may underflow; callers
+            # can override via trainer_kwargs(precision="16-mixed") if needed.
+            if torch.cuda.is_bf16_supported():
+                return "bf16-mixed"
+            return "16-mixed"
+        if torch.backends.mps.is_available():
             return "16-mixed"
         return "32-true"
 

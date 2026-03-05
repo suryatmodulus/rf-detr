@@ -135,10 +135,13 @@ class TestBuildTrainerPrecision:
         assert trainer.precision == "32-true"
 
     def test_amp_true_cpu_gives_32_true(self, tmp_path):
-        """amp=True on CPU (no CUDA) must fall back to '32-true'."""
+        """amp=True on CPU (no CUDA, no MPS) must fall back to '32-true'."""
         import unittest.mock as mock
 
-        with mock.patch("torch.cuda.is_available", return_value=False):
+        with (
+            mock.patch("torch.cuda.is_available", return_value=False),
+            mock.patch("torch.backends.mps.is_available", return_value=False),
+        ):
             trainer = build_trainer(_tc(tmp_path, use_ema=False), _mc(amp=True))
         assert trainer.precision == "32-true"
 
@@ -166,12 +169,12 @@ class TestBuildTrainerPrecision:
             build_trainer(_tc(tmp_path, use_ema=False), _mc(amp=True))
         assert captured["precision"] == "16-mixed"
 
-    def test_amp_true_cuda_bf16_supported_still_gives_16_mixed(self, tmp_path):
-        """amp=True with CUDA + bf16 hardware still produces '16-mixed' (not 'bf16-mixed').
+    def test_amp_true_cuda_bf16_supported_gives_bf16_mixed(self, tmp_path):
+        """amp=True with CUDA + bf16 hardware produces 'bf16-mixed' (scaler-free).
 
-        bf16 is gated behind a TODO: training from random init with only 7 mantissa
-        bits causes gradient underflow.  Until that is resolved we always fall back to
-        fp16-mixed (which uses GradScaler) even when the hardware supports bf16.
+        On Ampere+ GPUs (bf16 supported) we select bf16-mixed to eliminate
+        GradScaler overhead.  Fine-tuning from pretrained weights is safe with
+        BF16; callers training from scratch can override via trainer_kwargs.
         """
         import unittest.mock as mock
 
@@ -187,7 +190,7 @@ class TestBuildTrainerPrecision:
             mock.patch("rfdetr.lit.Trainer", side_effect=_fake_trainer),
         ):
             build_trainer(_tc(tmp_path, use_ema=False), _mc(amp=True))
-        assert captured["precision"] == "16-mixed"
+        assert captured["precision"] == "bf16-mixed"
 
 
 class TestBuildTrainerEMAShardingGuard:
