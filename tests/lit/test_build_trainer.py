@@ -392,6 +392,24 @@ class TestBuildTrainerKwargs:
         trainer = build_trainer(_tc(tmp_path, output_dir=out, use_ema=False), _mc())
         assert str(trainer.default_root_dir) == out
 
+    def test_trainer_kwargs_can_override_precision(self, tmp_path):
+        """Explicit trainer kwargs must override default precision without raising."""
+        import unittest.mock as mock
+
+        captured: dict = {}
+
+        def _fake_trainer(**kwargs):
+            captured.update(kwargs)
+            return mock.MagicMock()
+
+        with mock.patch("rfdetr.lit.Trainer", side_effect=_fake_trainer):
+            build_trainer(
+                _tc(tmp_path, use_ema=False),
+                _mc(amp=True),
+                precision="32-true",
+            )
+        assert captured["precision"] == "32-true"
+
 
 class TestBuildTrainerSeed:
     """build_trainer() must not mutate global RNG state."""

@@ -95,6 +95,8 @@ class COCOEvalCallback(Callback):
         )
         kwargs["backend"] = "faster_coco_eval"
         self.map_metric = MeanAveragePrecision(iou_type=iou_type, **kwargs)
+        # Separate metric for the EMA model; created lazily in on_validation_batch_end.
+        self.map_metric_ema: Any = None
 
     def on_fit_start(self, trainer: Any, pl_module: Any) -> None:
         """Pull class names from the DataModule once the datasets are set up.
@@ -147,11 +149,15 @@ class COCOEvalCallback(Callback):
         ``RFDETRModule.validation_step``:
         ``{"results": list[dict], "targets": list[dict]}``.
 
+        When an EMA callback is present the EMA model is run on the same batch
+        in a separate ``torch.no_grad()`` forward pass so that base and EMA
+        metrics are computed from independent predictions.
+
         Args:
             trainer: The PTL Trainer.
             pl_module: The LightningModule.
             outputs: Return value of ``validation_step``.
-            batch: Raw batch (unused here).
+            batch: The device-transferred batch ``(samples, targets)``.
             batch_idx: Batch index within the validation epoch.
         """
         preds: list[dict[str, torch.Tensor]] = self._convert_preds(outputs["results"])
@@ -162,6 +168,28 @@ class COCOEvalCallback(Callback):
         iou_type = "segm" if self._segmentation else "bbox"
         batch_matching = build_matching_data(preds, targets, iou_threshold=0.5, iou_type=iou_type)
         merge_matching_data(self._f1_local, batch_matching)
+
+        # Run EMA model separately on the same batch so that base and EMA metrics
+        # are computed from independent forward passes rather than being aliases.
+        ema_cb = self._get_ema_callback(trainer)
+        if ema_cb is not None and ema_cb._average_model is not None:
+            if self.map_metric_ema is None:
+                ema_iou_type: Any = ["bbox", "segm"] if self._segmentation else "bbox"
+                self.map_metric_ema = MeanAveragePrecision(
+                    iou_type=ema_iou_type,
+                    class_metrics=True,
+                    max_detection_thresholds=[1, 10, self._max_dets],
+                    backend="faster_coco_eval",
+                ).to(pl_module.device)
+            samples, _ = batch
+            orig_sizes = torch.stack([t["orig_size"] for t in outputs["targets"]]).to(pl_module.device)
+            ema_underlying = ema_cb._average_model.module.model
+            with torch.no_grad():
+                ema_underlying.eval()  # AveragedModel deepcopy is not managed by PTL
+                ema_outputs = ema_underlying(samples)
+                ema_results = pl_module.postprocess(ema_outputs, orig_sizes)
+            ema_preds = self._convert_preds(ema_results)
+            self.map_metric_ema.update(ema_preds, targets)
 
     def on_validation_epoch_end(self, trainer: Any, pl_module: Any) -> None:
         """Compute and log mAP and F1 metrics at the end of the validation epoch.
@@ -176,6 +204,8 @@ class COCOEvalCallback(Callback):
             is_last_epoch = isinstance(max_epochs, int) and max_epochs > 0 and current_epoch >= max_epochs
             if current_epoch % self._eval_interval != 0 and not is_last_epoch:
                 self.map_metric.reset()
+                if self.map_metric_ema is not None:
+                    self.map_metric_ema.reset()
                 self._f1_local = init_matching_accumulator()
                 return
         self._compute_and_log(trainer, pl_module, "val")
@@ -255,12 +285,6 @@ class COCOEvalCallback(Callback):
         pl_module.log(f"{split}/mAP_50", metrics[f"{pfx}map_50"])
         pl_module.log(f"{split}/mAP_75", metrics[f"{pfx}map_75"])
         pl_module.log(f"{split}/mAR", metrics[mar_key])
-        if self._has_ema_callback(trainer):
-            # In PTL, validation runs with EMA weights when RFDETREMACallback is
-            # enabled, so emit explicit ema_* aliases for monitoring/logging.
-            pl_module.log(f"{split}/ema_mAP_50_95", metrics[f"{pfx}map"])
-            pl_module.log(f"{split}/ema_mAP_50", metrics[f"{pfx}map_50"])
-            pl_module.log(f"{split}/ema_mAR", metrics[mar_key])
 
         # Write directly into callback_metrics so ModelCheckpoint / EarlyStopping
         # read fresh values each epoch.  pl_module.log() from a callback's
@@ -270,10 +294,19 @@ class COCOEvalCallback(Callback):
         trainer.callback_metrics[f"{split}/mAP_50"] = metrics[f"{pfx}map_50"].detach().cpu()
         trainer.callback_metrics[f"{split}/mAP_75"] = metrics[f"{pfx}map_75"].detach().cpu()
         trainer.callback_metrics[f"{split}/mAR"] = metrics[mar_key].detach().cpu()
-        if self._has_ema_callback(trainer):
-            trainer.callback_metrics[f"{split}/ema_mAP_50_95"] = metrics[f"{pfx}map"].detach().cpu()
-            trainer.callback_metrics[f"{split}/ema_mAP_50"] = metrics[f"{pfx}map_50"].detach().cpu()
-            trainer.callback_metrics[f"{split}/ema_mAR"] = metrics[mar_key].detach().cpu()
+
+        # EMA metrics — computed from a separate EMA forward pass accumulated
+        # in on_validation_batch_end, so base and EMA values are independent.
+        if self.map_metric_ema is not None:
+            ema_metrics = self.map_metric_ema.compute()
+            ema_mar_key = f"{pfx}mar_{self._max_dets}"
+            pl_module.log(f"{split}/ema_mAP_50_95", ema_metrics[f"{pfx}map"])
+            pl_module.log(f"{split}/ema_mAP_50", ema_metrics[f"{pfx}map_50"])
+            pl_module.log(f"{split}/ema_mAR", ema_metrics[ema_mar_key])
+            trainer.callback_metrics[f"{split}/ema_mAP_50_95"] = ema_metrics[f"{pfx}map"].detach().cpu()
+            trainer.callback_metrics[f"{split}/ema_mAP_50"] = ema_metrics[f"{pfx}map_50"].detach().cpu()
+            trainer.callback_metrics[f"{split}/ema_mAR"] = ema_metrics[ema_mar_key].detach().cpu()
+            self.map_metric_ema.reset()
 
         if self._segmentation:
             overall["segm mAP 50:95"] = float(metrics["segm_map"])
@@ -355,10 +388,14 @@ class COCOEvalCallback(Callback):
 
     def _has_ema_callback(self, trainer: Any) -> bool:
         """Return whether an EMA callback is present in the Trainer."""
+        return self._get_ema_callback(trainer) is not None
+
+    def _get_ema_callback(self, trainer: Any) -> Any:
+        """Return the EMA callback instance, or ``None`` if not present."""
         for callback in getattr(trainer, "callbacks", []):
             if callable(getattr(callback, "get_ema_model_state_dict", None)):
-                return True
-        return False
+                return callback
+        return None
 
     def _build_per_class_rows(
         self,

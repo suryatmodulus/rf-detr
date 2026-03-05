@@ -261,23 +261,28 @@ class TestOnValidationEpochEnd:
         assert "val/mAP_75" in logged_keys
         assert "val/mAR" in logged_keys
 
-    def test_ema_metric_aliases_logged_when_ema_callback_present(self) -> None:
-        """val/ema_* aliases are emitted when EMA callback is present."""
+    def test_ema_metrics_logged_when_map_metric_ema_populated(self) -> None:
+        """val/ema_* metrics are logged when map_metric_ema has accumulated data.
+
+        EMA metrics are now computed from a separate map_metric_ema that is
+        populated during on_validation_batch_end (not aliased from base metrics).
+        """
         cb = COCOEvalCallback(max_dets=500)
-        ema_cb = MagicMock(name="ema_cb")
-        ema_cb.get_ema_model_state_dict = MagicMock(return_value={"w": torch.zeros(1)})
-        trainer = _make_trainer(callbacks=[ema_cb])
-        cb.setup(trainer, _make_pl_module(), stage="fit")
+        cb.setup(_make_trainer(), _make_pl_module(), stage="fit")
         cb.map_metric = MagicMock(name="map_metric")
         cb.map_metric.compute.return_value = self._minimal_metrics()
+        # Simulate map_metric_ema being populated by on_validation_batch_end.
+        cb.map_metric_ema = MagicMock(name="map_metric_ema")
+        cb.map_metric_ema.compute.return_value = self._minimal_metrics()
         module = _make_pl_module()
 
-        cb.on_validation_epoch_end(trainer, module)
+        cb.on_validation_epoch_end(_make_trainer(), module)
 
         logged_keys = {c.args[0] for c in module.log.call_args_list}
         assert "val/ema_mAP_50_95" in logged_keys
         assert "val/ema_mAP_50" in logged_keys
         assert "val/ema_mAR" in logged_keys
+        cb.map_metric_ema.reset.assert_called_once()
 
     def test_f1_metrics_logged_when_gt_present(self) -> None:
         """val/F1, val/precision, val/recall are logged when GT exists."""
@@ -462,16 +467,16 @@ class TestOnValidationEpochEnd:
         assert trainer.callback_metrics["val/mAP_50_95"].item() == pytest.approx(0.4)
         assert trainer.callback_metrics["val/mAP_50"].item() == pytest.approx(0.6)
 
-    def test_callback_metrics_updated_with_ema_aliases(self) -> None:
-        """EMA alias metrics are written to callback_metrics when EMA callback is present."""
+    def test_callback_metrics_updated_with_ema_when_map_metric_ema_populated(self) -> None:
+        """EMA metrics are written to callback_metrics when map_metric_ema has data."""
         cb = COCOEvalCallback(max_dets=500)
-        ema_cb = MagicMock(name="ema_cb")
-        ema_cb.get_ema_model_state_dict = MagicMock(return_value={"w": torch.zeros(1)})
-        trainer = _make_trainer(callbacks=[ema_cb])
+        trainer = _make_trainer()
         trainer.callback_metrics = {}
         cb.setup(trainer, _make_pl_module(), stage="fit")
         cb.map_metric = MagicMock(name="map_metric")
         cb.map_metric.compute.return_value = self._minimal_metrics()
+        cb.map_metric_ema = MagicMock(name="map_metric_ema")
+        cb.map_metric_ema.compute.return_value = self._minimal_metrics()
 
         cb.on_validation_epoch_end(trainer, _make_pl_module())
 
@@ -680,23 +685,19 @@ class TestOnTestEpochEnd:
         assert "test/mAP_75" in logged_keys
         assert "test/mAR" in logged_keys
 
-    def test_ema_metric_aliases_logged_when_ema_callback_present(self) -> None:
-        """test/ema_* aliases are emitted when EMA callback is present."""
+    def test_no_ema_aliases_for_test(self) -> None:
+        """test/ema_* aliases are NOT logged — test always runs with EMA weights
+        via the RFDETREMACallback swap so test/mAP_50 is already the EMA result."""
         cb = COCOEvalCallback(max_dets=500)
-        ema_cb = MagicMock(name="ema_cb")
-        ema_cb.get_ema_model_state_dict = MagicMock(return_value={"w": torch.zeros(1)})
-        trainer = _make_trainer(callbacks=[ema_cb])
-        cb.setup(trainer, _make_pl_module(), stage="test")
+        cb.setup(_make_trainer(), _make_pl_module(), stage="test")
         cb.map_metric = MagicMock(name="map_metric")
         cb.map_metric.compute.return_value = self._minimal_metrics()
         module = _make_pl_module()
 
-        cb.on_test_epoch_end(trainer, module)
+        cb.on_test_epoch_end(_make_trainer(), module)
 
         logged_keys = {c.args[0] for c in module.log.call_args_list}
-        assert "test/ema_mAP_50_95" in logged_keys
-        assert "test/ema_mAP_50" in logged_keys
-        assert "test/ema_mAR" in logged_keys
+        assert not any(k.startswith("test/ema_") for k in logged_keys)
 
     def test_val_prefix_not_logged(self) -> None:
         """test_epoch_end must not emit val/ keys — prefixes must not bleed across loops."""

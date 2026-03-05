@@ -99,6 +99,10 @@ class RFDETREMACallback(Callback):
             use_buffers=self._use_buffers,
             avg_fn=self._avg_fn,
         )
+        # The averaged model is inference-only; PTL never calls .eval() on it
+        # because it is not registered as a Lightning module.  Without this,
+        # dropout layers stay in training mode and produce ~random outputs.
+        self._average_model.eval()
 
         if self._pending_average_state_dict is not None:
             self._average_model.load_state_dict(self._pending_average_state_dict)
@@ -162,14 +166,6 @@ class RFDETREMACallback(Callback):
         if trainer.current_epoch > self._latest_update_epoch and self.should_update(epoch_idx=trainer.current_epoch):
             self._average_model.update_parameters(pl_module)
             self._latest_update_epoch = trainer.current_epoch
-
-    def on_validation_epoch_start(self, trainer: Trainer, pl_module: LightningModule) -> None:
-        """Evaluate validation using averaged EMA weights."""
-        self._swap_models(pl_module)
-
-    def on_validation_epoch_end(self, trainer: Trainer, pl_module: LightningModule) -> None:
-        """Restore live training weights after validation."""
-        self._swap_models(pl_module)
 
     def on_test_epoch_start(self, trainer: Trainer, pl_module: LightningModule) -> None:
         """Evaluate tests using averaged EMA weights."""

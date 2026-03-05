@@ -207,23 +207,24 @@ def build_trainer(
     clip_max_norm: float = tc.clip_max_norm
     sync_bn: bool = tc.sync_bn
 
-    return Trainer(
-        max_epochs=tc.epochs,
-        accelerator=accelerator,
-        devices="auto",
-        strategy=strategy,
-        precision=_resolve_precision(),
-        accumulate_grad_batches=tc.grad_accum_steps,
-        gradient_clip_val=clip_max_norm,
-        sync_batchnorm=sync_bn,
-        callbacks=callbacks,
-        logger=loggers if loggers else False,
-        enable_progress_bar=tc.progress_bar,
-        default_root_dir=tc.output_dir,
-        log_every_n_steps=50,
-        deterministic=False,
-        **trainer_kwargs,
-    )
+    trainer_config: dict[str, Any] = {
+        "max_epochs": tc.epochs,
+        "accelerator": accelerator,
+        "devices": "auto",
+        "strategy": strategy,
+        "precision": _resolve_precision(),
+        "accumulate_grad_batches": tc.grad_accum_steps,
+        "gradient_clip_val": clip_max_norm,
+        "sync_batchnorm": sync_bn,
+        "callbacks": callbacks,
+        "logger": loggers if loggers else False,
+        "enable_progress_bar": tc.progress_bar,
+        "default_root_dir": tc.output_dir,
+        "log_every_n_steps": 50,
+        "deterministic": False,
+    }
+    trainer_config.update(trainer_kwargs)
+    return Trainer(**trainer_config)
 
 
 __all__ = [

@@ -258,7 +258,9 @@ class RFDETRModule(LightningModule):
         # legacy engine, which scales each sub-batch by 1/grad_accum_steps before
         # backward().  PTL accumulates full-scale gradients by default; dividing
         # here keeps the effective LR identical to the non-PTL training path.
-        loss = loss / self.trainer.accumulate_grad_batches
+        # We return the scaled loss to PTL but log the unscaled value so that
+        # train/loss and val/loss are on the same scale.
+        loss_scaled = loss / self.trainer.accumulate_grad_batches
         train_log_sync_dist = bool(self.train_config.train_log_sync_dist)
         train_log_on_step = bool(self.train_config.train_log_on_step)
         self.log_dict(
@@ -277,7 +279,7 @@ class RFDETRModule(LightningModule):
             sync_dist=train_log_sync_dist,
             batch_size=batch_size,
         )
-        return loss
+        return loss_scaled
 
     def validation_step(self, batch: Tuple, batch_idx: int) -> Dict[str, Any]:
         """Run forward pass and postprocess for one validation step.

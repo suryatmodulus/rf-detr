@@ -7,7 +7,12 @@
 """Post-training metrics plotting utilities.
 
 Reads the ``metrics.csv`` written by PTL's ``CSVLogger`` (always present
-after a ``build_trainer``-based run) and saves a 2×2 matplotlib figure.
+after a ``build_trainer``-based run) and saves a seaborn figure grouped by
+metric type (Loss, AP@0.50, AP@0.50:0.95, AR).
+
+Loss panel shows only the aggregate ``train/loss`` and ``val/loss`` scalars.
+AP/AR panels show all ``val/`` columns for each group — both the base and EMA
+series when EMA is enabled, so both are visible in the legend.
 
 Usage::
 
@@ -24,15 +29,13 @@ from typing import Optional
 def plot_metrics(
     metrics_csv: str,
     output_path: Optional[str] = None,
+    loss_log_scale: bool = False,
 ) -> str:
-    """Read a PTL ``CSVLogger`` metrics file and save a 2×2 training plot.
+    """Read a PTL ``CSVLogger`` metrics file and save a seaborn training plot.
 
-    The figure contains four subplots:
-
-    * **(0, 0)** Training and Validation Loss
-    * **(0, 1)** Average Precision @0.50 (base vs EMA)
-    * **(1, 0)** Average Precision @0.50:0.95 (base vs EMA)
-    * **(1, 1)** Average Recall @0.50:0.95 (base vs EMA)
+    The figure contains one subplot per metric group (Loss, AP@0.50,
+    AP@0.50:0.95, AR), arranged in a 2-column grid.  Only groups with at
+    least one non-NaN column are shown.
 
     Args:
         metrics_csv: Path to the ``metrics.csv`` file produced by
@@ -44,7 +47,8 @@ def plot_metrics(
         The absolute path where the figure was saved.
 
     Raises:
-        ImportError: If ``matplotlib`` or ``pandas`` are not installed.
+        ImportError: If ``matplotlib``, ``pandas``, or ``seaborn`` are not
+            installed.
         FileNotFoundError: If ``metrics_csv`` does not exist.
     """
     try:
@@ -60,6 +64,11 @@ def plot_metrics(
     except ImportError as exc:
         raise ImportError("pandas is required for plot_metrics(). Install it with: pip install pandas") from exc
 
+    try:
+        import seaborn as sns
+    except ImportError as exc:
+        raise ImportError("seaborn is required for plot_metrics(). Install it with: pip install seaborn") from exc
+
     csv_path = Path(metrics_csv)
     if not csv_path.exists():
         raise FileNotFoundError(f"metrics.csv not found: {csv_path}")
@@ -68,44 +77,55 @@ def plot_metrics(
         output_path = str(csv_path.parent / "metrics_plot.png")
 
     df = pd.read_csv(csv_path)
-    # CSVLogger writes one row per step with NaN for metrics not logged that step.
-    # Aggregate by epoch (mean of non-NaN values per column per epoch).
     if "epoch" not in df.columns:
         raise ValueError("metrics.csv does not contain an 'epoch' column.")
+    # CSVLogger writes one row per step; aggregate to one row per epoch.
     df = df.groupby("epoch").mean(numeric_only=True).reset_index()
 
-    fig, axes = plt.subplots(2, 2, figsize=(12, 8))
+    def _val_cols(*patterns: str) -> list[str]:
+        """Return val/ columns whose name contains any of the given patterns."""
+        return [c for c in df.columns if c.startswith("val/") and any(p in c for p in patterns) and df[c].notna().any()]
+
+    # Loss: only the aggregate scalars, not per-component breakdowns.
+    loss_cols = [c for c in ("train/loss", "val/loss", "test/loss") if c in df.columns and df[c].notna().any()]
+
+    # AP/AR: all val/ columns matching each group (base + EMA when present).
+    # test/ metrics are excluded — they only appear at the final epoch as a
+    # single dot which seaborn renders as a legend entry with no visible line.
+    metric_groups: dict[str, list[str]] = {
+        "Loss": loss_cols,
+        "AP@0.50": _val_cols("mAP_50"),  # matches mAP_50 and ema_mAP_50 but not mAP_50_95
+        "AP@0.50:0.95": _val_cols("mAP_50_95"),
+        "AR": _val_cols("mAR"),
+    }
+    # Exclude mAP_50_95 hits from the AP@0.50 bucket (substring overlap).
+    metric_groups["AP@0.50"] = [c for c in metric_groups["AP@0.50"] if "mAP_50_95" not in c]
+    metric_groups = {k: v for k, v in metric_groups.items() if v}
+
+    n_groups = len(metric_groups)
+    n_cols = 2
+    n_rows = (n_groups + n_cols - 1) // n_cols
+
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(12, 5 * n_rows), squeeze=False)
+    axes_flat = axes.flatten()
+
+    melted = df.melt(id_vars="epoch", var_name="metric", value_name="value")
+
+    for idx, (title, metric_list) in enumerate(metric_groups.items()):
+        ax = axes_flat[idx]
+        group_data = melted[melted["metric"].isin(metric_list)]
+        sns.lineplot(data=group_data, x="epoch", y="value", hue="metric", marker="o", ax=ax)
+        ax.set_title(title, fontsize=13, fontweight="bold")
+        ax.set_xlabel("Epoch", fontsize=11)
+        ax.set_ylabel(title, fontsize=11)
+        ax.grid(True, alpha=0.3)
+        if title == "Loss" and loss_log_scale:
+            ax.set_yscale("log")
+
+    for idx in range(n_groups, len(axes_flat)):
+        axes_flat[idx].set_visible(False)
+
     fig.suptitle("RF-DETR Training Metrics", fontsize=14)
-
-    def _plot(ax: "plt.Axes", title: str, cols: list[tuple[str, str]]) -> None:
-        """Plot one or more columns onto an axis if they exist in df."""
-        any_plotted = False
-        for col, label in cols:
-            if col in df.columns and df[col].notna().any():
-                ax.plot(df["epoch"], df[col], label=label)
-                any_plotted = True
-        ax.set_title(title)
-        ax.set_xlabel("Epoch")
-        if any_plotted:
-            ax.legend()
-
-    _plot(axes[0, 0], "Loss", [("train/loss", "train"), ("val/loss", "val")])
-    _plot(
-        axes[0, 1],
-        "AP@0.50",
-        [("val/mAP_50", "base"), ("val/ema_mAP_50", "EMA")],
-    )
-    _plot(
-        axes[1, 0],
-        "AP@0.50:0.95",
-        [("val/mAP_50_95", "base"), ("val/ema_mAP_50_95", "EMA")],
-    )
-    _plot(
-        axes[1, 1],
-        "AR@0.50:0.95",
-        [("val/mAR", "base"), ("val/ema_mAR", "EMA")],
-    )
-
     fig.tight_layout()
     fig.savefig(output_path, dpi=150)
     plt.close(fig)
