@@ -13,10 +13,9 @@ import os
 import random
 from typing import Any, Dict, Optional, Tuple
 
-import numpy as np
 import torch
 import torch.nn.functional as F
-from pytorch_lightning import LightningModule
+from pytorch_lightning import LightningModule, seed_everything
 
 from rfdetr.assets.model_weights import download_pretrain_weights, validate_pretrain_weights
 from rfdetr.config import ModelConfig, TrainConfig
@@ -25,7 +24,6 @@ from rfdetr.datasets.coco import compute_multi_scale_scales
 # TODO(Chapter 6): remove this import when _args.py is deleted.
 from rfdetr.lit._args import _build_args_from_configs
 from rfdetr.models import build_criterion_and_postprocessors, build_model
-from rfdetr.util.drop_scheduler import drop_scheduler
 from rfdetr.util.get_param_dicts import get_param_dict
 from rfdetr.util.logger import get_logger
 from rfdetr.util.misc import NestedTensor
@@ -60,10 +58,6 @@ class RFDETRModule(LightningModule):
         if self._args.backbone_lora:
             self._apply_lora()
         self.criterion, self.postprocess = build_criterion_and_postprocessors(self._args)
-
-        # Drop path / dropout schedule arrays — populated in on_train_start.
-        self._dp_schedule: Optional[np.ndarray] = None
-        self._do_schedule: Optional[np.ndarray] = None
 
     # ------------------------------------------------------------------
     # Helpers
@@ -158,39 +152,17 @@ class RFDETRModule(LightningModule):
     # PTL lifecycle hooks
     # ------------------------------------------------------------------
 
-    def on_train_start(self) -> None:
-        """Pre-compute drop path and dropout schedules for the full run.
+    def on_fit_start(self) -> None:
+        """Seed RNGs at fit start when ``TrainConfig.seed`` is set.
 
-        Called once before the first training epoch. Uses
-        ``trainer.estimated_stepping_batches`` so the schedule length
-        matches the actual optimizer-step count.
+        This avoids hidden global side-effects in ``build_trainer`` while still
+        preserving deterministic training behaviour for actual fit runs.
         """
-        args = self._args
-        tc = self.train_config
-        total_steps = int(self.trainer.estimated_stepping_batches)
-        steps_per_epoch = max(1, total_steps // tc.epochs)
-
-        if getattr(args, "drop_path", 0.0) > 0:
-            self._dp_schedule = drop_scheduler(
-                args.drop_path,
-                tc.epochs,
-                steps_per_epoch,
-                args.cutoff_epoch,
-                args.drop_mode,
-                args.drop_schedule,
-            )
-        if getattr(args, "dropout", 0.0) > 0:
-            self._do_schedule = drop_scheduler(
-                args.dropout,
-                tc.epochs,
-                steps_per_epoch,
-                args.cutoff_epoch,
-                args.drop_mode,
-                args.drop_schedule,
-            )
+        if self.train_config.seed is not None:
+            seed_everything(self.train_config.seed, workers=True)
 
     def on_train_batch_start(self, batch: Tuple, batch_idx: int) -> None:
-        """Apply per-step drop path / dropout rates and optional multi-scale resize.
+        """Apply optional multi-scale resize to the incoming batch.
 
         Modifications to ``batch`` (in-place on ``NestedTensor``) are visible
         in ``training_step`` because they share the same object.
@@ -199,20 +171,14 @@ class RFDETRModule(LightningModule):
             batch: Tuple of (NestedTensor samples, list of target dicts).
             batch_idx: Index of the current batch within the epoch.
         """
-        step = self.trainer.global_step
         args = self._args
-
-        if self._dp_schedule is not None and step < len(self._dp_schedule):
-            self.model.update_drop_path(self._dp_schedule[step], args.vit_encoder_num_layers)
-
-        if self._do_schedule is not None and step < len(self._do_schedule):
-            self.model.update_dropout(self._do_schedule[step])
 
         if args.multi_scale and not args.do_random_resize_via_padding:
             samples, _ = batch
             scales = compute_multi_scale_scales(
                 args.resolution, args.expanded_scales, args.patch_size, args.num_windows
             )
+            step = self.trainer.global_step
             random.seed(step)
             scale = random.choice(scales)
             with torch.no_grad():
@@ -317,9 +283,9 @@ class RFDETRModule(LightningModule):
         def lr_lambda(current_step: int) -> float:
             if current_step < warmup_steps:
                 return float(current_step) / float(max(1, warmup_steps))
-            if args.lr_scheduler == "cosine":
+            if tc.lr_scheduler == "cosine":
                 progress = float(current_step - warmup_steps) / float(max(1, total_steps - warmup_steps))
-                return args.lr_min_factor + (1 - args.lr_min_factor) * 0.5 * (1 + math.cos(math.pi * progress))
+                return tc.lr_min_factor + (1 - tc.lr_min_factor) * 0.5 * (1 + math.cos(math.pi * progress))
             # Step decay: drop by 10× after lr_drop epochs.
             if current_step < tc.lr_drop * steps_per_epoch:
                 return 1.0

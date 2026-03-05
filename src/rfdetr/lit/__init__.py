@@ -52,10 +52,6 @@ def build_trainer(
     guards EMA against sharded strategies, wires conditional loggers, and applies
     promoted training knobs (gradient clipping, sync_batchnorm, strategy).
 
-    Fields ``clip_max_norm``, ``seed``, and ``sync_bn`` are read via ``getattr``
-    with safe defaults so this function works before those fields are promoted to
-    ``TrainConfig`` in T4-2.
-
     Args:
         train_config: Training hyperparameter configuration.
         model_config: Architecture configuration (used for precision and segmentation).
@@ -77,7 +73,6 @@ def build_trainer(
     """
     tc = train_config
 
-    # --- Seed (T4-2 promoted seed to TrainConfig) ---
     if tc.seed is not None:
         seed_everything(tc.seed, workers=True)
 
@@ -228,4 +223,5 @@ __all__ = [
     "RFDETRModule",
     "build_trainer",
     "convert_legacy_checkpoint",
+    "seed_everything",
 ]

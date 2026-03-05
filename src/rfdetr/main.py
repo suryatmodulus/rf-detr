@@ -1055,6 +1055,8 @@ def get_args_parser():
     return parser
 
 
+# NOTE: `deprecate.deprecated` intentionally uses the keyword `template_mgs`
+# (upstream spelling) in its public API.
 @deprecated(
     target=None,
     deprecated_in="1.5.1",

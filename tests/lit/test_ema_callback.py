@@ -9,10 +9,12 @@
 from __future__ import annotations
 
 import math
+import warnings
 
 import pytest
 import torch
 from torch import nn
+from torch.optim.swa_utils import AveragedModel
 
 from rfdetr.lit.callbacks.ema import RFDETREMACallback
 from rfdetr.util.utils import ModelEma
@@ -112,3 +114,38 @@ class TestShouldUpdate:
     def test_should_update_neither(self) -> None:
         cb = RFDETREMACallback()
         assert cb.should_update() is False
+
+
+class TestInit:
+    """Construction and EMA-state access behavior."""
+
+    def test_init_emits_no_user_warning(self) -> None:
+        """Instantiation should not emit runtime UserWarnings."""
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            RFDETREMACallback()
+        user_warns = [w for w in caught if issubclass(w.category, UserWarning)]
+        assert not user_warns
+
+    def test_get_ema_model_state_dict_none_before_setup(self) -> None:
+        """EMA state accessor returns None before averaged model is created."""
+        cb = RFDETREMACallback()
+        assert cb.get_ema_model_state_dict() is None
+
+    def test_get_ema_model_state_dict_returns_model_weights(self) -> None:
+        """EMA state accessor returns the wrapped `.model` state dict."""
+
+        class _Container(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.model = nn.Linear(4, 2)
+
+        cb = RFDETREMACallback()
+        container = _Container()
+        cb._average_model = AveragedModel(container, avg_fn=cb._avg_fn)
+
+        state = cb.get_ema_model_state_dict()
+
+        assert state is not None
+        assert "weight" in state
+        assert "bias" in state

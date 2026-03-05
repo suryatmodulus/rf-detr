@@ -375,22 +375,14 @@ class TestBuildTrainerKwargs:
 
 
 class TestBuildTrainerSeed:
-    """build_trainer() must call seed_everything when seed is set."""
+    """build_trainer() must not mutate global RNG state."""
 
-    def test_seed_is_applied(self, tmp_path):
-        """seed_everything is called when a seed is present on the config."""
+    def test_seed_is_not_applied_in_factory(self, tmp_path):
+        """Seeding is deferred to RFDETRModule.on_fit_start (no factory side-effect)."""
         import unittest.mock as mock
 
         tc = _tc(tmp_path, use_ema=False, seed=42)
 
-        with mock.patch("rfdetr.lit.seed_everything") as mock_seed:
+        with mock.patch("pytorch_lightning.seed_everything") as mock_seed:
             build_trainer(tc, _mc())
-        mock_seed.assert_called_once_with(42, workers=True)
-
-    def test_no_seed_skips_seed_everything(self, tmp_path):
-        """seed_everything is not called when seed is None (default)."""
-        import unittest.mock as mock
-
-        with mock.patch("rfdetr.lit.seed_everything") as mock_seed:
-            build_trainer(_tc(tmp_path, use_ema=False), _mc())
         mock_seed.assert_not_called()

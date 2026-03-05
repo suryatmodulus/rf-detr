@@ -10,7 +10,6 @@ import math
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-import numpy as np
 import pytest
 import torch
 from torch import nn
@@ -140,8 +139,8 @@ def make_batch():
 
 
 class TestInit:
-    """Tests for RFDETRModule.__init__ — covers attribute assignment, schedule
-    initialisation, and delegation to build_model() / build_criterion_and_postprocessors()
+    """Tests for RFDETRModule.__init__ — covers attribute assignment and
+    delegation to build_model() / build_criterion_and_postprocessors()
     when pretrain_weights is None."""
 
     def test_model_is_set(self, build_module):
@@ -158,18 +157,6 @@ class TestInit:
         """__init__ must assign the built postprocessor to module.postprocess."""
         module, _, _, fake_pp = build_module()
         assert module.postprocess is fake_pp
-
-    @pytest.mark.parametrize(
-        "attr",
-        [
-            pytest.param("_dp_schedule", id="drop-path"),
-            pytest.param("_do_schedule", id="dropout"),
-        ],
-    )
-    def test_schedule_initially_none(self, attr, build_module):
-        """Both drop-path and dropout schedules must be None until on_train_start computes them."""
-        module, _, _, _ = build_module()
-        assert getattr(module, attr) is None
 
     def test_configs_stored(self, base_model_config, base_train_config, build_module):
         """Both model and train configs must be stored for later access."""
@@ -413,68 +400,38 @@ class TestApplyLora:
         assert fake_backbone_0.encoder is peft_wrapped
 
 
-class TestOnTrainStart:
-    """Tests for on_train_start() — verifies that drop-path and dropout schedules are
-    pre-computed from trainer.estimated_stepping_batches and that no schedule is
-    allocated when the corresponding rate is zero."""
+class TestOnFitStart:
+    """Tests for on_fit_start() seeding behavior."""
 
-    def _attach_trainer(self, module, total_steps=1000):
-        trainer = MagicMock()
-        trainer.estimated_stepping_batches = total_steps
-        module._trainer = trainer
-        type(module).trainer = property(lambda self: self._trainer)
-
-    @pytest.mark.parametrize(
-        "attr",
-        [
-            pytest.param("_dp_schedule", id="drop-path"),
-            pytest.param("_do_schedule", id="dropout"),
-        ],
-    )
-    def test_schedule_stays_none_when_zero(self, attr, base_train_config, build_module):
-        """A schedule must remain None when the corresponding regularization rate is 0.0."""
-        tc = base_train_config(drop_path=0.0, epochs=10)
+    @patch("rfdetr.lit.module.seed_everything")
+    def test_seed_applied_when_configured(self, mock_seed, base_train_config, build_module):
+        """Configured seed should be applied at fit start."""
+        tc = base_train_config(seed=7)
         module, _, _, _ = build_module(train_config=tc)
-        self._attach_trainer(module, total_steps=1000)
 
-        module.on_train_start()
+        module.on_fit_start()
 
-        assert getattr(module, attr) is None
+        mock_seed.assert_called_once_with(7, workers=True)
 
-    def test_drop_path_schedule_created_when_positive(self, base_train_config, build_module):
-        """A positive drop_path rate must produce a numpy schedule array."""
-        tc = base_train_config(drop_path=0.2, epochs=10)
+    @patch("rfdetr.lit.module.seed_everything")
+    def test_seed_skipped_when_none(self, mock_seed, base_train_config, build_module):
+        """No seed means on_fit_start should not call seed_everything."""
+        tc = base_train_config(seed=None)
         module, _, _, _ = build_module(train_config=tc)
-        self._attach_trainer(module, total_steps=1000)
 
-        module.on_train_start()
+        module.on_fit_start()
 
-        assert module._dp_schedule is not None
-        assert isinstance(module._dp_schedule, np.ndarray)
-
-    def test_drop_path_schedule_length_matches_total_steps(self, base_train_config, build_module):
-        """Schedule length must equal epochs * steps_per_epoch for correct indexing."""
-        tc = base_train_config(drop_path=0.1, epochs=10)
-        module, _, _, _ = build_module(train_config=tc)
-        total_steps = 500
-        self._attach_trainer(module, total_steps=total_steps)
-
-        module.on_train_start()
-
-        steps_per_epoch = total_steps // tc.epochs
-        assert len(module._dp_schedule) == tc.epochs * steps_per_epoch
+        mock_seed.assert_not_called()
 
 
 class TestOnTrainBatchStart:
-    """Tests for on_train_batch_start() — covers per-step drop-path application,
-    multi-scale interpolation of NestedTensor inputs, and the guard that skips
-    resize when do_random_resize_via_padding is enabled."""
+    """Tests for on_train_batch_start() — covers multi-scale interpolation of
+    NestedTensor inputs and verifies regularization scheduling is delegated to
+    DropPathCallback."""
 
     def _setup_module(
         self,
         tmp_path,
-        dp_schedule=None,
-        do_schedule=None,
         multi_scale=False,
         do_random_resize_via_padding=False,
     ):
@@ -484,8 +441,6 @@ class TestOnTrainBatchStart:
             do_random_resize_via_padding=do_random_resize_via_padding,
         )
         module, fake_model, _, _ = _build_module(train_config=tc)
-        module._dp_schedule = dp_schedule
-        module._do_schedule = do_schedule
 
         trainer = MagicMock()
         trainer.global_step = 0
@@ -494,25 +449,23 @@ class TestOnTrainBatchStart:
 
         return module, fake_model
 
-    def test_drop_path_applied_via_update_drop_path(self, tmp_path):
-        """Each step must apply the scheduled drop-path rate to the model."""
-        schedule = np.array([0.1, 0.2, 0.3])
-        module, fake_model = self._setup_module(tmp_path, dp_schedule=schedule)
+    def test_drop_path_not_applied_in_module_hook(self, tmp_path):
+        """Drop-path scheduling must be handled by DropPathCallback, not module hook."""
+        module, fake_model = self._setup_module(tmp_path)
         module._trainer.global_step = 1
 
         module.on_train_batch_start(_make_batch(), batch_idx=1)
 
-        fake_model.update_drop_path.assert_called_once_with(0.2, module._args.vit_encoder_num_layers)
+        fake_model.update_drop_path.assert_not_called()
 
-    def test_dropout_applied_via_update_dropout(self, tmp_path):
-        """Each step must apply the scheduled dropout rate to the model."""
-        schedule = np.array([0.1, 0.2, 0.3])
-        module, fake_model = self._setup_module(tmp_path, do_schedule=schedule)
+    def test_dropout_not_applied_in_module_hook(self, tmp_path):
+        """Dropout scheduling must be handled by DropPathCallback, not module hook."""
+        module, fake_model = self._setup_module(tmp_path)
         module._trainer.global_step = 2
 
         module.on_train_batch_start(_make_batch(), batch_idx=2)
 
-        fake_model.update_dropout.assert_called_once_with(0.3)
+        fake_model.update_dropout.assert_not_called()
 
     @pytest.mark.parametrize(
         "method_name",
@@ -549,24 +502,6 @@ class TestOnTrainBatchStart:
         module.on_train_batch_start((samples, targets), batch_idx=0)
 
         assert samples.tensors.shape == original_shape
-
-    @pytest.mark.parametrize(
-        "schedule_attr, method_name",
-        [
-            pytest.param("_dp_schedule", "update_drop_path", id="drop-path"),
-            pytest.param("_do_schedule", "update_dropout", id="dropout"),
-        ],
-    )
-    def test_update_skipped_when_step_exceeds_schedule(self, schedule_attr, method_name, tmp_path):
-        """Steps beyond the schedule length must safely skip regularization updates."""
-        schedule = np.array([0.1, 0.2])
-        module, fake_model = self._setup_module(tmp_path)
-        setattr(module, schedule_attr, schedule)
-        module._trainer.global_step = 5  # beyond schedule length
-
-        module.on_train_batch_start(_make_batch(), batch_idx=0)
-
-        getattr(fake_model, method_name).assert_not_called()
 
 
 class TestTransferBatchToDevice:
@@ -881,6 +816,28 @@ class TestConfigureOptimizers:
 
         # step 900 > 800 → factor 0.1
         assert lr_lambda(900) == pytest.approx(0.1)
+
+    @patch("rfdetr.lit.module.get_param_dict")
+    def test_lr_lambda_cosine_reads_train_config_fields(self, mock_get_param_dict, tmp_path):
+        """Cosine scheduler must read lr_scheduler/lr_min_factor from TrainConfig."""
+        module, param_dicts = self._setup_module(
+            tmp_path,
+            warmup_epochs=0.0,
+            epochs=10,
+            lr_scheduler="cosine",
+            lr_min_factor=0.2,
+        )
+        module._trainer.estimated_stepping_batches = 1000
+        # Guard against regressions that read deprecated Namespace fields.
+        delattr(module._args, "lr_scheduler")
+        delattr(module._args, "lr_min_factor")
+        mock_get_param_dict.return_value = param_dicts
+
+        scheduler = module.configure_optimizers()["lr_scheduler"]["scheduler"]
+        lr_lambda = scheduler.lr_lambdas[0]
+
+        # At the final step, cosine schedule must end at lr_min_factor.
+        assert lr_lambda(1000) == pytest.approx(0.2)
 
 
 class TestPredictStep:

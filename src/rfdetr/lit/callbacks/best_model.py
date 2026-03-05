@@ -68,6 +68,32 @@ class BestModelCallback(ModelCheckpoint):
         # Stash current pl_module so _save_checkpoint (no pl_module param) can access it.
         self._current_pl_module: Optional[LightningModule] = None
 
+    def _get_ema_model_state_dict(
+        self,
+        trainer: Trainer,
+        pl_module: LightningModule,
+    ) -> dict[str, torch.Tensor]:
+        """Resolve EMA model weights from the active EMA callback.
+
+        Args:
+            trainer: The Lightning Trainer instance.
+            pl_module: The ``RFDETRModule`` being trained.
+
+        Returns:
+            EMA model state dict when available, otherwise the live model state dict.
+        """
+        for callback in trainer.callbacks:
+            getter = getattr(callback, "get_ema_model_state_dict", None)
+            if callable(getter):
+                state_dict = getter()
+                if state_dict is not None:
+                    return state_dict
+                break
+        logger.warning(
+            "EMA metric improved but EMA callback weights were unavailable; saving current model weights as fallback."
+        )
+        return pl_module.model.state_dict()
+
     def _save_checkpoint(self, trainer: Trainer, filepath: str) -> None:
         """Save stripped ``.pth`` format instead of a full ``.ckpt``.
 
@@ -81,6 +107,8 @@ class BestModelCallback(ModelCheckpoint):
         if not trainer.is_global_zero:
             return
         pl_module = self._current_pl_module
+        if pl_module is None:
+            raise RuntimeError("BestModelCallback._save_checkpoint called before pl_module was set.")
         pth_path = Path(filepath)
         pth_path.parent.mkdir(parents=True, exist_ok=True)
         torch.save(
@@ -117,9 +145,10 @@ class BestModelCallback(ModelCheckpoint):
         if ema_val > self._best_ema:
             self._best_ema = ema_val
             self._output_dir.mkdir(parents=True, exist_ok=True)
+            ema_state_dict = self._get_ema_model_state_dict(trainer, pl_module)
             torch.save(
                 {
-                    "model": pl_module.model.state_dict(),
+                    "model": ema_state_dict,
                     "args": pl_module.train_config,
                     "epoch": trainer.current_epoch,
                 },

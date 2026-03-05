@@ -9,35 +9,21 @@
 from __future__ import annotations
 
 import math
-import warnings
-from typing import Optional
+from copy import deepcopy
+from typing import Any, Optional
 
 import torch
-from pytorch_lightning.callbacks import WeightAveraging
+from pytorch_lightning import Callback, LightningModule, Trainer
+from torch.optim.swa_utils import AveragedModel
 
 
-class RFDETREMACallback(WeightAveraging):
+class RFDETREMACallback(Callback):
     """Exponential Moving Average with optional tau-based warm-up.
 
-    Drop-in replacement for ``rfdetr.util.utils.ModelEma`` that delegates
-    weight averaging to PyTorch Lightning's ``WeightAveraging`` callback.
+    Drop-in replacement for ``rfdetr.util.utils.ModelEma`` implemented as a
+    plain Lightning callback around :class:`torch.optim.swa_utils.AveragedModel`.
     The ``_avg_fn`` reproduces the exact same formula as ``ModelEma``
     (1-indexed ``updates`` counter, optional ``tau`` warm-up).
-
-    .. important::
-
-        This is a **custom EMA implementation** ported from the legacy
-        ``ModelEma`` for behavioural parity.  It has **not** been
-        experimentally compared against
-        :class:`pytorch_lightning.callbacks.EMAWeightAveraging` (available
-        since PTL 2.6.0), which uses a simpler fixed-decay formula without
-        the tau warm-up.  Before stabilising this API, run ablations
-        comparing training mAP curves with both implementations.  If the PTL
-        baseline proves equivalent, replace this class with::
-
-            EMAWeightAveraging(decay=tc.ema_decay, update_starting_at_epoch=0)
-
-        to eliminate the custom subclass entirely.
 
     Args:
         decay: Base EMA decay factor. Corresponds to ``TrainConfig.ema_decay``.
@@ -45,22 +31,20 @@ class RFDETREMACallback(WeightAveraging):
             effective decay ramps from 0 towards *decay* following
             ``decay * (1 - exp(-updates / tau))``. Corresponds to
             ``TrainConfig.ema_tau``.
+        use_buffers: Whether buffers are averaged in addition to parameters.
     """
 
-    def __init__(self, decay: float = 0.993, tau: int = 100) -> None:
-        warnings.warn(
-            "RFDETREMACallback uses a custom EMA implementation (tau warm-up) "
-            "ported from the legacy ModelEma.  pytorch_lightning.callbacks.EMAWeightAveraging "
-            "(PTL 2.6+) provides a simpler fixed-decay alternative that may be equivalent in "
-            "practice.  See the class docstring for migration guidance.",
-            UserWarning,
-            stacklevel=2,
-        )
-        # Must be set before super().__init__ because avg_fn=self._avg_fn
-        # creates a reference to the bound method stored in _kwargs.
+    def __init__(self, decay: float = 0.993, tau: int = 100, use_buffers: bool = True) -> None:
+        super().__init__()
         self._decay = decay
         self._tau = tau
-        super().__init__(use_buffers=True, avg_fn=self._avg_fn)
+        self._use_buffers = use_buffers
+
+        self._average_model: Optional[AveragedModel] = None
+        self._latest_update_step = 0
+        self._latest_update_epoch = -1
+        self._swapped_state_dict: Optional[dict[str, torch.Tensor]] = None
+        self._pending_average_state_dict: Optional[dict[str, Any]] = None
 
     def _avg_fn(
         self,
@@ -90,6 +74,28 @@ class RFDETREMACallback(WeightAveraging):
             effective_decay = self._decay
         return averaged_param * effective_decay + model_param * (1.0 - effective_decay)
 
+    def setup(self, trainer: Trainer, pl_module: LightningModule, stage: str) -> None:
+        """Initialise the averaged model at fit start.
+
+        Args:
+            trainer: The Lightning Trainer instance.
+            pl_module: The ``RFDETRModule`` being trained.
+            stage: Current trainer stage (``"fit"``, ``"validate"``, ...).
+        """
+        if stage != "fit":
+            return
+
+        self._average_model = AveragedModel(
+            model=pl_module,
+            device=pl_module.device,
+            use_buffers=self._use_buffers,
+            avg_fn=self._avg_fn,
+        )
+
+        if self._pending_average_state_dict is not None:
+            self._average_model.load_state_dict(self._pending_average_state_dict)
+            self._pending_average_state_dict = None
+
     def should_update(
         self,
         step_idx: Optional[int] = None,
@@ -109,3 +115,82 @@ class RFDETREMACallback(WeightAveraging):
             Whether the averaged model should be updated.
         """
         return step_idx is not None or epoch_idx is not None
+
+    def _swap_models(self, pl_module: LightningModule) -> None:
+        """Swap live model weights with averaged EMA weights."""
+        if self._average_model is None:
+            return
+        if self._swapped_state_dict is None:
+            self._swapped_state_dict = deepcopy(pl_module.state_dict())
+            pl_module.load_state_dict(self._average_model.module.state_dict(), strict=True)
+            return
+        pl_module.load_state_dict(self._swapped_state_dict, strict=True)
+        self._swapped_state_dict = None
+
+    def on_train_batch_end(
+        self,
+        trainer: Trainer,
+        pl_module: LightningModule,
+        outputs: Any,
+        batch: Any,
+        batch_idx: int,
+    ) -> None:
+        """Update EMA after optimizer steps."""
+        if self._average_model is None:
+            return
+        step_idx = trainer.global_step - 1
+        if trainer.global_step > self._latest_update_step and self.should_update(step_idx=step_idx):
+            self._average_model.update_parameters(pl_module)
+            self._latest_update_step = trainer.global_step
+
+    def on_train_epoch_end(self, trainer: Trainer, pl_module: LightningModule) -> None:
+        """Optionally update EMA at epoch boundaries."""
+        if self._average_model is None:
+            return
+        if trainer.current_epoch > self._latest_update_epoch and self.should_update(epoch_idx=trainer.current_epoch):
+            self._average_model.update_parameters(pl_module)
+            self._latest_update_epoch = trainer.current_epoch
+
+    def on_validation_epoch_start(self, trainer: Trainer, pl_module: LightningModule) -> None:
+        """Evaluate validation using averaged EMA weights."""
+        self._swap_models(pl_module)
+
+    def on_validation_epoch_end(self, trainer: Trainer, pl_module: LightningModule) -> None:
+        """Restore live training weights after validation."""
+        self._swap_models(pl_module)
+
+    def on_test_epoch_start(self, trainer: Trainer, pl_module: LightningModule) -> None:
+        """Evaluate tests using averaged EMA weights."""
+        self._swap_models(pl_module)
+
+    def on_test_epoch_end(self, trainer: Trainer, pl_module: LightningModule) -> None:
+        """Restore live weights after test evaluation."""
+        self._swap_models(pl_module)
+
+    def on_train_end(self, trainer: Trainer, pl_module: LightningModule) -> None:
+        """Leave the module in EMA state after training finishes."""
+        if self._average_model is not None:
+            pl_module.load_state_dict(self._average_model.module.state_dict(), strict=True)
+        self._swapped_state_dict = None
+
+    def state_dict(self) -> dict[str, Any]:
+        """Return callback state for checkpointing."""
+        state = {
+            "latest_update_step": self._latest_update_step,
+            "latest_update_epoch": self._latest_update_epoch,
+        }
+        if self._average_model is not None:
+            state["average_model_state_dict"] = self._average_model.state_dict()
+        return state
+
+    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
+        """Restore callback state from checkpoints."""
+        self._latest_update_step = state_dict.get("latest_update_step", 0)
+        self._latest_update_epoch = state_dict.get("latest_update_epoch", -1)
+        self._pending_average_state_dict = state_dict.get("average_model_state_dict")
+
+    def get_ema_model_state_dict(self) -> Optional[dict[str, torch.Tensor]]:
+        """Expose EMA model weights for external checkpoint callbacks."""
+        if self._average_model is None or not hasattr(self._average_model.module, "model"):
+            return None
+        return {k: v.detach().clone() for k, v in self._average_model.module.model.state_dict().items()}
