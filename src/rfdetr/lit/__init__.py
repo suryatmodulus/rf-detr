@@ -26,7 +26,6 @@ from pytorch_lightning.loggers import CSVLogger, MLFlowLogger, TensorBoardLogger
 from rfdetr.lit.callbacks import (
     BestModelCallback,
     DropPathCallback,
-    MetricsPlotCallback,
     RFDETREarlyStopping,
     RFDETREMACallback,
 )
@@ -143,9 +142,6 @@ def build_trainer(
             )
         )
 
-    # Metrics plot saved at end of training.
-    callbacks.append(MetricsPlotCallback(output_dir=tc.output_dir))
-
     # --- Build loggers ---
     # Each logger is guarded by a try/except because tensorboard, wandb, and mlflow
     # are optional dependencies (installed via the [metrics] extra).  A missing dep
@@ -225,7 +221,6 @@ def build_trainer(
 __all__ = [
     "BestModelCallback",
     "DropPathCallback",
-    "MetricsPlotCallback",
     "RFDETRCli",
     "RFDETRDataModule",
     "RFDETREMACallback",

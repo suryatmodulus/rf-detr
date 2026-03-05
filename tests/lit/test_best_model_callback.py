@@ -13,6 +13,7 @@ from unittest.mock import MagicMock
 
 import pytest
 import torch
+from pytorch_lightning.trainer.states import TrainerFn
 
 from rfdetr.lit.callbacks.best_model import BestModelCallback, RFDETREarlyStopping
 
@@ -26,12 +27,25 @@ def _make_trainer(
     current_epoch: int = 1,
     is_global_zero: bool = True,
 ) -> MagicMock:
-    """Create a minimal mock Trainer with controllable callback_metrics."""
+    """Create a minimal mock Trainer with controllable callback_metrics.
+
+    Sets the attributes required by ModelCheckpoint and EarlyStopping
+    skip-guards so that callbacks run normally in unit tests.
+    """
     trainer = MagicMock()
     trainer.callback_metrics = {k: torch.tensor(v) for k, v in metrics.items()}
     trainer.current_epoch = current_epoch
     trainer.is_global_zero = is_global_zero
     trainer.should_stop = False
+    # Required by ModelCheckpoint._should_skip_saving_checkpoint
+    trainer.fast_dev_run = False
+    trainer.state.fn = TrainerFn.FITTING
+    trainer.sanity_checking = False
+    trainer.global_step = 1  # int; differs from _last_global_step_saved=0
+    # Required by EarlyStopping._log_info (world_size > 1 check)
+    trainer.world_size = 1
+    # Required by ModelCheckpoint.check_monitor_top_k and EarlyStopping (DDP reduce)
+    trainer.strategy.reduce_boolean_decision.side_effect = lambda x, **kwargs: x
     return trainer
 
 
@@ -75,7 +89,7 @@ class TestBestModelCallback:
         path = tmp_path / "checkpoint_best_regular.pth"
         stat_before = path.stat().st_mtime_ns
 
-        # Second call with worse metric
+        # Second call with worse metric (same global_step → ModelCheckpoint skip guard fires)
         trainer2 = _make_trainer({"val/mAP_50_95": 0.3})
         cb.on_validation_end(trainer2, pl_module)
 
@@ -299,7 +313,7 @@ class TestRFDETREarlyStopping:
         cb = RFDETREarlyStopping(patience=5, min_delta=0.001)
         pl_module = _make_pl_module()
 
-        # Seed best_map with initial improvement
+        # Seed best_score with initial improvement
         trainer0 = _make_trainer({"val/mAP_50_95": 0.5})
         cb.on_validation_end(trainer0, pl_module)
 
@@ -309,7 +323,7 @@ class TestRFDETREarlyStopping:
             cb.on_validation_end(trainer, pl_module)
 
         assert trainer.should_stop is False
-        assert cb._counter == 3
+        assert cb.wait_count == 3
 
     def test_stops_after_patience_exceeded(self) -> None:
         """patience=3 with 3 no-improvement epochs triggers stop."""
@@ -340,12 +354,12 @@ class TestRFDETREarlyStopping:
         for _ in range(2):
             trainer = _make_trainer({"val/mAP_50_95": 0.5})
             cb.on_validation_end(trainer, pl_module)
-        assert cb._counter == 2
+        assert cb.wait_count == 2
 
         # Improvement
         trainer = _make_trainer({"val/mAP_50_95": 0.6})
         cb.on_validation_end(trainer, pl_module)
-        assert cb._counter == 0
+        assert cb.wait_count == 0
 
     def test_min_delta_respected(self) -> None:
         """Improvement smaller than min_delta does not reset counter."""
@@ -359,7 +373,7 @@ class TestRFDETREarlyStopping:
         # Improve by only half of min_delta
         trainer = _make_trainer({"val/mAP_50_95": 0.505})
         cb.on_validation_end(trainer, pl_module)
-        assert cb._counter == 1  # not reset
+        assert cb.wait_count == 1  # not reset
 
     def test_use_ema_true_monitors_ema_only(self) -> None:
         """use_ema=True with both metrics available uses EMA value only."""
@@ -370,8 +384,8 @@ class TestRFDETREarlyStopping:
         trainer = _make_trainer({"val/mAP_50_95": 0.8, "val/ema_mAP_50_95": 0.3})
         cb.on_validation_end(trainer, pl_module)
 
-        # best_map should be EMA value, not regular
-        assert cb._best_map == pytest.approx(0.3)
+        # best_score should reflect EMA value, not regular
+        assert cb.best_score.item() == pytest.approx(0.3)
 
     def test_use_ema_false_monitors_max(self) -> None:
         """use_ema=False with both metrics uses max(regular, ema)."""
@@ -382,7 +396,7 @@ class TestRFDETREarlyStopping:
         cb.on_validation_end(trainer, pl_module)
 
         # max(0.4, 0.6) = 0.6
-        assert cb._best_map == pytest.approx(0.6)
+        assert cb.best_score.item() == pytest.approx(0.6)
 
     def test_only_regular_available(self) -> None:
         """When EMA key is absent, uses regular metric without error."""
@@ -392,8 +406,8 @@ class TestRFDETREarlyStopping:
         trainer = _make_trainer({"val/mAP_50_95": 0.45})
         cb.on_validation_end(trainer, pl_module)
 
-        assert cb._best_map == pytest.approx(0.45)
-        assert cb._counter == 0
+        assert cb.best_score.item() == pytest.approx(0.45)
+        assert cb.wait_count == 0
 
     def test_neither_available_is_noop(self) -> None:
         """Neither metric present causes no counter increment and no stop."""
@@ -403,7 +417,7 @@ class TestRFDETREarlyStopping:
         trainer = _make_trainer({})  # no metrics at all
         cb.on_validation_end(trainer, pl_module)
 
-        assert cb._counter == 0
+        assert cb.wait_count == 0
         assert trainer.should_stop is False
 
     @pytest.mark.parametrize(

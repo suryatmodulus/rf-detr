@@ -16,7 +16,6 @@ from rfdetr.lit.callbacks.best_model import BestModelCallback, RFDETREarlyStoppi
 from rfdetr.lit.callbacks.coco_eval import COCOEvalCallback
 from rfdetr.lit.callbacks.drop_schedule import DropPathCallback
 from rfdetr.lit.callbacks.ema import RFDETREMACallback
-from rfdetr.lit.callbacks.metrics import MetricsPlotCallback
 
 
 def _mc(**kwargs):
@@ -73,12 +72,6 @@ class TestBuildTrainerCallbacks:
         trainer = build_trainer(_tc(tmp_path, use_ema=False), _mc())
         types = [type(cb) for cb in trainer.callbacks]
         assert BestModelCallback in types
-
-    def test_metrics_plot_always_present(self, tmp_path):
-        """MetricsPlotCallback is always included."""
-        trainer = build_trainer(_tc(tmp_path, use_ema=False), _mc())
-        types = [type(cb) for cb in trainer.callbacks]
-        assert MetricsPlotCallback in types
 
     def test_ema_callback_when_use_ema_true(self, tmp_path):
         """RFDETREMACallback is added when use_ema=True."""

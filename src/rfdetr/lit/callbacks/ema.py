@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import math
+import warnings
 from typing import Optional
 
 import torch
@@ -23,6 +24,21 @@ class RFDETREMACallback(WeightAveraging):
     The ``_avg_fn`` reproduces the exact same formula as ``ModelEma``
     (1-indexed ``updates`` counter, optional ``tau`` warm-up).
 
+    .. important::
+
+        This is a **custom EMA implementation** ported from the legacy
+        ``ModelEma`` for behavioural parity.  It has **not** been
+        experimentally compared against
+        :class:`pytorch_lightning.callbacks.EMAWeightAveraging` (available
+        since PTL 2.6.0), which uses a simpler fixed-decay formula without
+        the tau warm-up.  Before stabilising this API, run ablations
+        comparing training mAP curves with both implementations.  If the PTL
+        baseline proves equivalent, replace this class with::
+
+            EMAWeightAveraging(decay=tc.ema_decay, update_starting_at_epoch=0)
+
+        to eliminate the custom subclass entirely.
+
     Args:
         decay: Base EMA decay factor. Corresponds to ``TrainConfig.ema_decay``.
         tau: Warm-up time constant (in optimizer steps). When > 0 the
@@ -32,6 +48,14 @@ class RFDETREMACallback(WeightAveraging):
     """
 
     def __init__(self, decay: float = 0.993, tau: int = 100) -> None:
+        warnings.warn(
+            "RFDETREMACallback uses a custom EMA implementation (tau warm-up) "
+            "ported from the legacy ModelEma.  pytorch_lightning.callbacks.EMAWeightAveraging "
+            "(PTL 2.6+) provides a simpler fixed-decay alternative that may be equivalent in "
+            "practice.  See the class docstring for migration guidance.",
+            UserWarning,
+            stacklevel=2,
+        )
         # Must be set before super().__init__ because avg_fn=self._avg_fn
         # creates a reference to the bound method stored in _kwargs.
         self._decay = decay
