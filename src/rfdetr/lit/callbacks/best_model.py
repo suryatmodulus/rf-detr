@@ -92,7 +92,9 @@ class BestModelCallback(ModelCheckpoint):
         logger.warning(
             "EMA metric improved but EMA callback weights were unavailable; saving current model weights as fallback."
         )
-        return pl_module.model.state_dict()
+        _orig = getattr(pl_module.model, "_orig_mod", None)
+        raw = _orig if isinstance(_orig, torch.nn.Module) else pl_module.model
+        return raw.state_dict()
 
     def _save_checkpoint(self, trainer: Trainer, filepath: str) -> None:
         """Save stripped ``.pth`` format instead of a full ``.ckpt``.
@@ -114,11 +116,14 @@ class BestModelCallback(ModelCheckpoint):
         # Validation metrics are produced with EMA weights when the EMA callback
         # is active, so save the same weight source to keep metric/checkpoint
         # consistency for the monitored "regular" key.
-        model_state_dict = (
-            self._get_ema_model_state_dict(trainer, pl_module)
-            if self._monitor_ema is not None
-            else pl_module.model.state_dict()
-        )
+        # Unwrap torch.compile's OptimizedModule (_orig_mod) so checkpoints always
+        # contain plain keys — non-compiled consumers (sync-back, compat.evaluate) can load them.
+        if self._monitor_ema is not None:
+            model_state_dict = self._get_ema_model_state_dict(trainer, pl_module)
+        else:
+            _orig = getattr(pl_module.model, "_orig_mod", None)
+            raw = _orig if isinstance(_orig, torch.nn.Module) else pl_module.model
+            model_state_dict = raw.state_dict()
         torch.save(
             {
                 "model": model_state_dict,
@@ -209,7 +214,11 @@ class BestModelCallback(ModelCheckpoint):
                 # Load best weights before test — mirrors legacy main.py:602-609.
                 if total_path.exists():
                     ckpt = torch.load(total_path, map_location="cpu", weights_only=False)
-                    pl_module.model.load_state_dict(ckpt["model"], strict=True)
+                    # Checkpoints always store plain keys; load into the unwrapped module
+                    # so compiled (OptimizedModule) and non-compiled models both work.
+                    _orig = getattr(pl_module.model, "_orig_mod", None)
+                    raw = _orig if isinstance(_orig, torch.nn.Module) else pl_module.model
+                    raw.load_state_dict(ckpt["model"], strict=True)
                     logger.info("Loaded best weights from %s for test evaluation.", total_path)
                 trainer.test(pl_module, datamodule=trainer.datamodule, verbose=False)
 
