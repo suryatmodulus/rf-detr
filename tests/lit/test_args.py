@@ -6,6 +6,8 @@
 
 """Unit tests for _build_args_from_configs — the canonical config-to-Namespace mapping."""
 
+import warnings
+
 import pytest
 
 from rfdetr.lit._args import _build_args_from_configs
@@ -108,3 +110,16 @@ class TestBuildArgsFromConfigs:
         mc = base_model_config(segmentation_head=True)
         args = _build_args_from_configs(mc, base_train_config())
         assert args.segmentation_head is True
+
+    def test_internal_populate_args_deprecation_warning_is_suppressed(self, base_model_config, base_train_config):
+        """Internal shim call must not leak populate_args FutureWarning to users."""
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            _build_args_from_configs(base_model_config(), base_train_config())
+
+        leaked = [
+            warning
+            for warning in caught
+            if issubclass(warning.category, FutureWarning) and "populate_args" in str(warning.message)
+        ]
+        assert not leaked

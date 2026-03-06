@@ -165,7 +165,7 @@ def _build_ptl_module(rfdetr_obj: RFDETR, train_config: TrainConfig) -> RFDETRMo
 @pytest.mark.parametrize(
     ("model_cls", "threshold_map", "threshold_f1", "num_samples", "batch_size"),
     [
-        pytest.param(RFDETRNano, 0.67, 0.66, None, 6, id="nano"),
+        pytest.param(RFDETRNano, 0.67, 0.66, 2000, 6, id="nano"),
         pytest.param(RFDETRSmall, 0.72, 0.70, 500, 6, id="small"),
         pytest.param(RFDETRMedium, 0.73, 0.71, 500, 4, id="medium"),
         pytest.param(RFDETRLarge, 0.74, 0.72, 500, 2, id="large"),

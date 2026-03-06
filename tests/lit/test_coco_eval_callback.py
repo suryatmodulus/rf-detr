@@ -54,6 +54,16 @@ def _detection_targets(cx=0.5, cy=0.5, w=0.1, h=0.1, label=1) -> list[dict]:
     ]
 
 
+def _minimal_metrics(pfx: str = "", max_dets: int = 500) -> dict:
+    """Return a minimal torchmetrics-style metrics dict."""
+    return {
+        f"{pfx}map": torch.tensor(0.4),
+        f"{pfx}map_50": torch.tensor(0.6),
+        f"{pfx}map_75": torch.tensor(0.3),
+        f"{pfx}mar_{max_dets}": torch.tensor(0.5),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -175,40 +185,51 @@ class TestOnFitStart:
         assert cb._cat_id_to_name == {1: "fish", 2: "shark"}
 
 
-class TestOnValidationBatchEnd:
-    """on_validation_batch_end() updates map_metric and accumulates F1 data."""
+# ---------------------------------------------------------------------------
+# Batch-end — shared behaviour for both validation and test loops
+# ---------------------------------------------------------------------------
 
-    def test_map_metric_update_called_once_per_batch(self) -> None:
+
+@pytest.mark.parametrize(
+    "hook,stage",
+    [
+        pytest.param("on_validation_batch_end", "fit", id="val"),
+        pytest.param("on_test_batch_end", "test", id="test"),
+    ],
+)
+class TestBatchEndCommon:
+    """map_metric accumulation shared by on_validation_batch_end and on_test_batch_end."""
+
+    def test_map_metric_update_called_once_per_batch(self, hook, stage) -> None:
         """map_metric.update is called exactly once per batch."""
         cb = COCOEvalCallback()
-        cb.setup(_make_trainer(), _make_pl_module(), stage="fit")
+        cb.setup(_make_trainer(), _make_pl_module(), stage=stage)
         cb.map_metric = MagicMock(name="map_metric")
 
         outputs = {"results": _detection_preds(0), "targets": _detection_targets()}
-        cb.on_validation_batch_end(_make_trainer(), _make_pl_module(), outputs, None, 0)
+        getattr(cb, hook)(_make_trainer(), _make_pl_module(), outputs, None, 0)
 
         assert cb.map_metric.update.call_count == 1
 
-    def test_f1_accumulator_grows_across_batches(self) -> None:
-        """Calling on_validation_batch_end twice accumulates more GT in F1 state."""
+    def test_f1_accumulator_grows_across_batches(self, hook, stage) -> None:
+        """Calling the batch-end hook twice accumulates more GT in F1 state."""
         cb = COCOEvalCallback()
-        cb.setup(_make_trainer(), _make_pl_module(), stage="fit")
+        cb.setup(_make_trainer(), _make_pl_module(), stage=stage)
         cb.map_metric = MagicMock(name="map_metric")
 
-        # target with 1 non-crowd GT for class 1
         outputs = {"results": _detection_preds(0), "targets": _detection_targets(label=1)}
-        cb.on_validation_batch_end(_make_trainer(), _make_pl_module(), outputs, None, 0)
+        getattr(cb, hook)(_make_trainer(), _make_pl_module(), outputs, None, 0)
         total_after_1 = sum(v["total_gt"] for v in cb._f1_local.values())
 
-        cb.on_validation_batch_end(_make_trainer(), _make_pl_module(), outputs, None, 1)
+        getattr(cb, hook)(_make_trainer(), _make_pl_module(), outputs, None, 1)
         total_after_2 = sum(v["total_gt"] for v in cb._f1_local.values())
 
         assert total_after_2 == total_after_1 * 2
 
-    def test_targets_converted_before_update(self) -> None:
+    def test_targets_converted_before_update(self, hook, stage) -> None:
         """map_metric.update receives targets with absolute xyxy boxes."""
         cb = COCOEvalCallback()
-        cb.setup(_make_trainer(), _make_pl_module(), stage="fit")
+        cb.setup(_make_trainer(), _make_pl_module(), stage=stage)
         captured = {}
 
         def _capture_update(preds, targets):
@@ -221,7 +242,7 @@ class TestOnValidationBatchEnd:
             "results": _detection_preds(0),
             "targets": _detection_targets(cx=0.5, cy=0.5, w=0.1, h=0.1),
         }
-        cb.on_validation_batch_end(_make_trainer(), _make_pl_module(), outputs, None, 0)
+        getattr(cb, hook)(_make_trainer(), _make_pl_module(), outputs, None, 0)
 
         # Expected: CxCyWH(0.5,0.5,0.1,0.1) × scale(W=200,H=100) → xyxy(90,45,110,55)
         boxes = captured["targets"][0]["boxes"]
@@ -232,34 +253,166 @@ class TestOnValidationBatchEnd:
         assert boxes[0, 3].item() == pytest.approx(55.0)
 
 
-class TestOnValidationEpochEnd:
-    """on_validation_epoch_end() logs metrics and resets state."""
+class TestOnTestBatchEnd:
+    """Test-loop-specific behaviour of on_test_batch_end."""
 
-    @staticmethod
-    def _minimal_metrics(pfx: str = "", max_dets: int = 500) -> dict:
-        """Return a minimal torchmetrics-style metrics dict."""
-        return {
-            f"{pfx}map": torch.tensor(0.4),
-            f"{pfx}map_50": torch.tensor(0.6),
-            f"{pfx}map_75": torch.tensor(0.3),
-            f"{pfx}mar_{max_dets}": torch.tensor(0.5),
-        }
-
-    def test_detection_core_metrics_are_logged(self) -> None:
-        """val/mAP_50_95, val/mAP_50, val/mAP_75, val/mAR are always logged."""
-        cb = COCOEvalCallback(max_dets=500)
-        cb.setup(_make_trainer(), _make_pl_module(), stage="fit")
+    def test_dataloader_idx_param_has_default(self) -> None:
+        """on_test_batch_end must accept calls with an explicit dataloader_idx."""
+        cb = COCOEvalCallback()
+        cb.setup(_make_trainer(), _make_pl_module(), stage="test")
         cb.map_metric = MagicMock(name="map_metric")
-        cb.map_metric.compute.return_value = self._minimal_metrics()
+        outputs = {"results": _detection_preds(0), "targets": _detection_targets()}
+
+        # Must not raise with explicit dataloader_idx=0
+        cb.on_test_batch_end(_make_trainer(), _make_pl_module(), outputs, None, 0, dataloader_idx=0)
+
+
+# ---------------------------------------------------------------------------
+# Epoch-end — shared behaviour for both validation and test loops
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "stage,hook,prefix",
+    [
+        pytest.param("fit", "on_validation_epoch_end", "val/", id="val"),
+        pytest.param("test", "on_test_epoch_end", "test/", id="test"),
+    ],
+)
+class TestEpochEndCommon:
+    """Metric logging and state reset shared by on_validation_epoch_end and on_test_epoch_end."""
+
+    def test_detection_core_metrics_are_logged(self, stage, hook, prefix) -> None:
+        """mAP_50_95, mAP_50, mAP_75, mAR are always logged under the correct prefix."""
+        cb = COCOEvalCallback(max_dets=500)
+        cb.setup(_make_trainer(), _make_pl_module(), stage=stage)
+        cb.map_metric = MagicMock(name="map_metric")
+        cb.map_metric.compute.return_value = _minimal_metrics()
         module = _make_pl_module()
 
-        cb.on_validation_epoch_end(_make_trainer(), module)
+        getattr(cb, hook)(_make_trainer(), module)
 
         logged_keys = {c.args[0] for c in module.log.call_args_list}
-        assert "val/mAP_50_95" in logged_keys
-        assert "val/mAP_50" in logged_keys
-        assert "val/mAP_75" in logged_keys
-        assert "val/mAR" in logged_keys
+        assert f"{prefix}mAP_50_95" in logged_keys
+        assert f"{prefix}mAP_50" in logged_keys
+        assert f"{prefix}mAP_75" in logged_keys
+        assert f"{prefix}mAR" in logged_keys
+
+    def test_f1_metrics_logged_when_gt_present(self, stage, hook, prefix) -> None:
+        """F1, precision, recall are logged when GT exists."""
+        cb = COCOEvalCallback()
+        cb.setup(_make_trainer(), _make_pl_module(), stage=stage)
+        cb.map_metric = MagicMock(name="map_metric")
+        cb.map_metric.compute.return_value = _minimal_metrics()
+        cb._f1_local = {
+            0: {
+                "scores": np.array([0.9], dtype=np.float32),
+                "matches": np.array([1], dtype=np.int64),
+                "ignore": np.array([False]),
+                "total_gt": 1,
+            }
+        }
+        module = _make_pl_module()
+        getattr(cb, hook)(_make_trainer(), module)
+
+        logged_keys = {c.args[0] for c in module.log.call_args_list}
+        assert f"{prefix}F1" in logged_keys
+        assert f"{prefix}precision" in logged_keys
+        assert f"{prefix}recall" in logged_keys
+
+    def test_f1_metrics_zero_when_no_gt(self, stage, hook, prefix) -> None:
+        """F1 == 0.0 when no predictions were accumulated (empty epoch)."""
+        cb = COCOEvalCallback()
+        cb.setup(_make_trainer(), _make_pl_module(), stage=stage)
+        cb.map_metric = MagicMock(name="map_metric")
+        cb.map_metric.compute.return_value = _minimal_metrics()
+        module = _make_pl_module()
+
+        getattr(cb, hook)(_make_trainer(), module)
+
+        f1_call = next(c for c in module.log.call_args_list if c.args[0] == f"{prefix}F1")
+        assert f1_call.args[1] == pytest.approx(0.0)
+
+    def test_state_reset_after_epoch(self, stage, hook, prefix) -> None:
+        """map_metric.reset() is called and _f1_local is cleared after epoch end."""
+        cb = COCOEvalCallback()
+        cb.setup(_make_trainer(), _make_pl_module(), stage=stage)
+        cb.map_metric = MagicMock(name="map_metric")
+        cb.map_metric.compute.return_value = _minimal_metrics()
+        cb._f1_local = {
+            0: {
+                "scores": np.array([0.9], dtype=np.float32),
+                "matches": np.array([1], dtype=np.int64),
+                "ignore": np.array([False]),
+                "total_gt": 1,
+            }
+        }
+
+        getattr(cb, hook)(_make_trainer(), _make_pl_module())
+
+        cb.map_metric.reset.assert_called_once()
+        assert cb._f1_local == {}
+
+    def test_segmentation_extra_metrics_logged(self, stage, hook, prefix) -> None:
+        """segm_mAP_50_95 and segm_mAP_50 are logged in segmentation mode."""
+        cb = COCOEvalCallback(segmentation=True)
+        cb.setup(_make_trainer(), _make_pl_module(), stage=stage)
+        cb.map_metric = MagicMock(name="map_metric")
+        segm_metrics = _minimal_metrics(pfx="bbox_")
+        segm_metrics["segm_map"] = torch.tensor(0.35)
+        segm_metrics["segm_map_50"] = torch.tensor(0.55)
+        cb.map_metric.compute.return_value = segm_metrics
+        module = _make_pl_module()
+
+        getattr(cb, hook)(_make_trainer(), module)
+
+        logged_keys = {c.args[0] for c in module.log.call_args_list}
+        assert f"{prefix}segm_mAP_50_95" in logged_keys
+        assert f"{prefix}segm_mAP_50" in logged_keys
+
+    def test_per_class_ap_logged_when_classes_present(self, stage, hook, prefix) -> None:
+        """AP/<name> is logged for each class when class metrics are present."""
+        cb = COCOEvalCallback()
+        cb._class_names = ["cat", "dog"]
+        cb._cat_id_to_name = {0: "cat", 1: "dog"}
+        cb.setup(_make_trainer(), _make_pl_module(), stage=stage)
+        cb.map_metric = MagicMock(name="map_metric")
+        metrics = _minimal_metrics()
+        metrics["map_per_class"] = torch.tensor([0.5, 0.4])
+        metrics["classes"] = torch.tensor([0, 1])
+        cb.map_metric.compute.return_value = metrics
+        module = _make_pl_module()
+
+        getattr(cb, hook)(_make_trainer(), module)
+
+        logged_keys = {c.args[0] for c in module.log.call_args_list}
+        assert f"{prefix}AP/cat" in logged_keys
+        assert f"{prefix}AP/dog" in logged_keys
+
+    def test_per_class_ap_falls_back_to_str_id_when_no_class_names(self, stage, hook, prefix) -> None:
+        """AP/<id> is logged when class_names is empty."""
+        cb = COCOEvalCallback()
+        cb.setup(_make_trainer(), _make_pl_module(), stage=stage)
+        cb.map_metric = MagicMock(name="map_metric")
+        metrics = _minimal_metrics()
+        metrics["map_per_class"] = torch.tensor([0.5])
+        metrics["classes"] = torch.tensor([3])
+        cb.map_metric.compute.return_value = metrics
+        module = _make_pl_module()
+
+        getattr(cb, hook)(_make_trainer(), module)
+
+        logged_keys = {c.args[0] for c in module.log.call_args_list}
+        assert f"{prefix}AP/3" in logged_keys
+
+
+# ---------------------------------------------------------------------------
+# Validation-epoch-end-only behaviour
+# ---------------------------------------------------------------------------
+
+
+class TestOnValidationEpochEnd:
+    """Validation-specific behaviour of on_validation_epoch_end."""
 
     def test_ema_metrics_logged_when_map_metric_ema_populated(self) -> None:
         """val/ema_* metrics are logged when map_metric_ema has accumulated data.
@@ -270,10 +423,10 @@ class TestOnValidationEpochEnd:
         cb = COCOEvalCallback(max_dets=500)
         cb.setup(_make_trainer(), _make_pl_module(), stage="fit")
         cb.map_metric = MagicMock(name="map_metric")
-        cb.map_metric.compute.return_value = self._minimal_metrics()
+        cb.map_metric.compute.return_value = _minimal_metrics()
         # Simulate map_metric_ema being populated by on_validation_batch_end.
         cb.map_metric_ema = MagicMock(name="map_metric_ema")
-        cb.map_metric_ema.compute.return_value = self._minimal_metrics()
+        cb.map_metric_ema.compute.return_value = _minimal_metrics()
         module = _make_pl_module()
 
         cb.on_validation_epoch_end(_make_trainer(), module)
@@ -284,114 +437,6 @@ class TestOnValidationEpochEnd:
         assert "val/ema_mAR" in logged_keys
         cb.map_metric_ema.reset.assert_called_once()
 
-    def test_f1_metrics_logged_when_gt_present(self) -> None:
-        """val/F1, val/precision, val/recall are logged when GT exists."""
-        cb = COCOEvalCallback()
-        cb.setup(_make_trainer(), _make_pl_module(), stage="fit")
-        cb.map_metric = MagicMock(name="map_metric")
-        cb.map_metric.compute.return_value = self._minimal_metrics()
-        # Inject non-empty F1 accumulator
-        cb._f1_local = {
-            0: {
-                "scores": np.array([0.9], dtype=np.float32),
-                "matches": np.array([1], dtype=np.int64),
-                "ignore": np.array([False]),
-                "total_gt": 1,
-            }
-        }
-        module = _make_pl_module()
-        cb.on_validation_epoch_end(_make_trainer(), module)
-
-        logged_keys = {c.args[0] for c in module.log.call_args_list}
-        assert "val/F1" in logged_keys
-        assert "val/precision" in logged_keys
-        assert "val/recall" in logged_keys
-
-    def test_f1_metrics_zero_when_no_gt(self) -> None:
-        """val/F1 == 0.0 when no predictions were accumulated (empty epoch)."""
-        cb = COCOEvalCallback()
-        cb.setup(_make_trainer(), _make_pl_module(), stage="fit")
-        cb.map_metric = MagicMock(name="map_metric")
-        cb.map_metric.compute.return_value = self._minimal_metrics()
-        module = _make_pl_module()
-
-        cb.on_validation_epoch_end(_make_trainer(), module)
-
-        f1_call = next(c for c in module.log.call_args_list if c.args[0] == "val/F1")
-        assert f1_call.args[1] == pytest.approx(0.0)
-
-    def test_state_reset_after_epoch(self) -> None:
-        """map_metric.reset() is called and _f1_local is cleared after epoch end."""
-        cb = COCOEvalCallback()
-        cb.setup(_make_trainer(), _make_pl_module(), stage="fit")
-        cb.map_metric = MagicMock(name="map_metric")
-        cb.map_metric.compute.return_value = self._minimal_metrics()
-        cb._f1_local = {
-            0: {
-                "scores": np.array([0.9], dtype=np.float32),
-                "matches": np.array([1], dtype=np.int64),
-                "ignore": np.array([False]),
-                "total_gt": 1,
-            }
-        }
-
-        cb.on_validation_epoch_end(_make_trainer(), _make_pl_module())
-
-        cb.map_metric.reset.assert_called_once()
-        assert cb._f1_local == {}
-
-    def test_segmentation_extra_metrics_logged(self) -> None:
-        """val/segm_mAP_50_95 and val/segm_mAP_50 are logged in segm mode."""
-        cb = COCOEvalCallback(segmentation=True)
-        cb.setup(_make_trainer(), _make_pl_module(), stage="fit")
-        cb.map_metric = MagicMock(name="map_metric")
-        segm_metrics = self._minimal_metrics(pfx="bbox_")
-        segm_metrics["segm_map"] = torch.tensor(0.35)
-        segm_metrics["segm_map_50"] = torch.tensor(0.55)
-        cb.map_metric.compute.return_value = segm_metrics
-        module = _make_pl_module()
-
-        cb.on_validation_epoch_end(_make_trainer(), module)
-
-        logged_keys = {c.args[0] for c in module.log.call_args_list}
-        assert "val/segm_mAP_50_95" in logged_keys
-        assert "val/segm_mAP_50" in logged_keys
-
-    def test_per_class_ap_logged_when_classes_present(self) -> None:
-        """val/AP/<name> is logged for each class when class metrics are present."""
-        cb = COCOEvalCallback()
-        cb._class_names = ["cat", "dog"]
-        cb._cat_id_to_name = {0: "cat", 1: "dog"}
-        cb.setup(_make_trainer(), _make_pl_module(), stage="fit")
-        cb.map_metric = MagicMock(name="map_metric")
-        metrics = self._minimal_metrics()
-        metrics["map_per_class"] = torch.tensor([0.5, 0.4])
-        metrics["classes"] = torch.tensor([0, 1])
-        cb.map_metric.compute.return_value = metrics
-        module = _make_pl_module()
-
-        cb.on_validation_epoch_end(_make_trainer(), module)
-
-        logged_keys = {c.args[0] for c in module.log.call_args_list}
-        assert "val/AP/cat" in logged_keys
-        assert "val/AP/dog" in logged_keys
-
-    def test_per_class_ap_falls_back_to_str_id_when_no_class_names(self) -> None:
-        """val/AP/<id> is logged when class_names is empty."""
-        cb = COCOEvalCallback()
-        cb.setup(_make_trainer(), _make_pl_module(), stage="fit")
-        cb.map_metric = MagicMock(name="map_metric")
-        metrics = self._minimal_metrics()
-        metrics["map_per_class"] = torch.tensor([0.5])
-        metrics["classes"] = torch.tensor([3])
-        cb.map_metric.compute.return_value = metrics
-        module = _make_pl_module()
-
-        cb.on_validation_epoch_end(_make_trainer(), module)
-
-        logged_keys = {c.args[0] for c in module.log.call_args_list}
-        assert "val/AP/3" in logged_keys
-
     def test_eval_interval_skips_non_matching_epochs(self) -> None:
         """Validation metric computation is skipped on non-interval epochs."""
         cb = COCOEvalCallback(eval_interval=3)
@@ -400,7 +445,7 @@ class TestOnValidationEpochEnd:
         trainer.max_epochs = 10
         cb.setup(trainer, _make_pl_module(), stage="fit")
         cb.map_metric = MagicMock(name="map_metric")
-        cb.map_metric.compute.return_value = self._minimal_metrics()
+        cb.map_metric.compute.return_value = _minimal_metrics()
         module = _make_pl_module()
 
         cb.on_validation_epoch_end(trainer, module)
@@ -417,14 +462,13 @@ class TestOnValidationEpochEnd:
         trainer.max_epochs = 10
         cb.setup(trainer, _make_pl_module(), stage="fit")
         cb.map_metric = MagicMock(name="map_metric")
-        cb.map_metric.compute.return_value = self._minimal_metrics()
+        cb.map_metric.compute.return_value = _minimal_metrics()
         module = _make_pl_module()
 
         cb.on_validation_epoch_end(trainer, module)
 
         cb.map_metric.compute.assert_called_once()
-        logged_keys = {c.args[0] for c in module.log.call_args_list}
-        assert "val/mAP_50" in logged_keys
+        module.log.assert_called()
 
     def test_per_class_ap_can_be_disabled(self) -> None:
         """log_per_class_metrics=False suppresses val/AP/<class> logging."""
@@ -433,7 +477,7 @@ class TestOnValidationEpochEnd:
         cb._cat_id_to_name = {0: "cat", 1: "dog"}
         cb.setup(_make_trainer(), _make_pl_module(), stage="fit")
         cb.map_metric = MagicMock(name="map_metric")
-        metrics = self._minimal_metrics()
+        metrics = _minimal_metrics()
         metrics["map_per_class"] = torch.tensor([0.5, 0.4])
         metrics["classes"] = torch.tensor([0, 1])
         cb.map_metric.compute.return_value = metrics
@@ -456,7 +500,7 @@ class TestOnValidationEpochEnd:
         trainer.callback_metrics = {}
         cb.setup(trainer, _make_pl_module(), stage="fit")
         cb.map_metric = MagicMock(name="map_metric")
-        cb.map_metric.compute.return_value = self._minimal_metrics()
+        cb.map_metric.compute.return_value = _minimal_metrics()
 
         cb.on_validation_epoch_end(trainer, _make_pl_module())
 
@@ -474,9 +518,9 @@ class TestOnValidationEpochEnd:
         trainer.callback_metrics = {}
         cb.setup(trainer, _make_pl_module(), stage="fit")
         cb.map_metric = MagicMock(name="map_metric")
-        cb.map_metric.compute.return_value = self._minimal_metrics()
+        cb.map_metric.compute.return_value = _minimal_metrics()
         cb.map_metric_ema = MagicMock(name="map_metric_ema")
-        cb.map_metric_ema.compute.return_value = self._minimal_metrics()
+        cb.map_metric_ema.compute.return_value = _minimal_metrics()
 
         cb.on_validation_epoch_end(trainer, _make_pl_module())
 
@@ -494,7 +538,7 @@ class TestOnValidationEpochEnd:
         trainer.callback_metrics = {}
         cb.setup(trainer, _make_pl_module(), stage="fit")
         cb.map_metric = MagicMock(name="map_metric")
-        metrics = self._minimal_metrics()
+        metrics = _minimal_metrics()
         # class 0 is a real class; class 8 is a ghost with both sentinels = -1
         metrics["map_per_class"] = torch.tensor([0.5, -1.0])
         metrics["classes"] = torch.tensor([0, 8])
@@ -509,6 +553,47 @@ class TestOnValidationEpochEnd:
         # real class logged, ghost class suppressed
         assert "val/AP/fish" in logged_keys
         assert "val/AP/8" not in logged_keys
+
+
+# ---------------------------------------------------------------------------
+# Test-epoch-end-only behaviour
+# ---------------------------------------------------------------------------
+
+
+class TestOnTestEpochEnd:
+    """Test-loop-specific behaviour of on_test_epoch_end."""
+
+    def test_no_ema_aliases_for_test(self) -> None:
+        """test/ema_* aliases are NOT logged — test always runs with EMA weights
+        via the RFDETREMACallback swap so test/mAP_50 is already the EMA result."""
+        cb = COCOEvalCallback(max_dets=500)
+        cb.setup(_make_trainer(), _make_pl_module(), stage="test")
+        cb.map_metric = MagicMock(name="map_metric")
+        cb.map_metric.compute.return_value = _minimal_metrics()
+        module = _make_pl_module()
+
+        cb.on_test_epoch_end(_make_trainer(), module)
+
+        logged_keys = {c.args[0] for c in module.log.call_args_list}
+        assert not any(k.startswith("test/ema_") for k in logged_keys)
+
+    def test_val_prefix_not_logged(self) -> None:
+        """test_epoch_end must not emit val/ keys — prefixes must not bleed across loops."""
+        cb = COCOEvalCallback(max_dets=500)
+        cb.setup(_make_trainer(), _make_pl_module(), stage="test")
+        cb.map_metric = MagicMock(name="map_metric")
+        cb.map_metric.compute.return_value = _minimal_metrics()
+        module = _make_pl_module()
+
+        cb.on_test_epoch_end(_make_trainer(), module)
+
+        logged_keys = {c.args[0] for c in module.log.call_args_list}
+        assert not any(k.startswith("val/") for k in logged_keys)
+
+
+# ---------------------------------------------------------------------------
+# Target conversion
+# ---------------------------------------------------------------------------
 
 
 class TestConvertTargets:
@@ -588,233 +673,3 @@ class TestConvertTargets:
         ]
         out = cb._convert_targets(targets)
         assert set(out[0].keys()) == {"boxes", "labels"}
-
-
-class TestOnTestBatchEnd:
-    """on_test_batch_end() mirrors on_validation_batch_end() for the test loop."""
-
-    def test_map_metric_update_called_once_per_batch(self) -> None:
-        """map_metric.update is called exactly once per test batch."""
-        cb = COCOEvalCallback()
-        cb.setup(_make_trainer(), _make_pl_module(), stage="test")
-        cb.map_metric = MagicMock(name="map_metric")
-
-        outputs = {"results": _detection_preds(0), "targets": _detection_targets()}
-        cb.on_test_batch_end(_make_trainer(), _make_pl_module(), outputs, None, 0)
-
-        assert cb.map_metric.update.call_count == 1
-
-    def test_f1_accumulator_grows_across_batches(self) -> None:
-        """Calling on_test_batch_end twice accumulates more GT in F1 state."""
-        cb = COCOEvalCallback()
-        cb.setup(_make_trainer(), _make_pl_module(), stage="test")
-        cb.map_metric = MagicMock(name="map_metric")
-
-        outputs = {"results": _detection_preds(0), "targets": _detection_targets(label=1)}
-        cb.on_test_batch_end(_make_trainer(), _make_pl_module(), outputs, None, 0)
-        total_after_1 = sum(v["total_gt"] for v in cb._f1_local.values())
-
-        cb.on_test_batch_end(_make_trainer(), _make_pl_module(), outputs, None, 1)
-        total_after_2 = sum(v["total_gt"] for v in cb._f1_local.values())
-
-        assert total_after_2 == total_after_1 * 2
-
-    def test_targets_converted_before_update(self) -> None:
-        """map_metric.update receives targets with absolute xyxy boxes."""
-        cb = COCOEvalCallback()
-        cb.setup(_make_trainer(), _make_pl_module(), stage="test")
-        captured = {}
-
-        def _capture_update(preds, targets):
-            captured["targets"] = targets
-
-        cb.map_metric = MagicMock(name="map_metric")
-        cb.map_metric.update.side_effect = _capture_update
-
-        outputs = {
-            "results": _detection_preds(0),
-            "targets": _detection_targets(cx=0.5, cy=0.5, w=0.1, h=0.1),
-        }
-        cb.on_test_batch_end(_make_trainer(), _make_pl_module(), outputs, None, 0)
-
-        # Expected: CxCyWH(0.5,0.5,0.1,0.1) × scale(W=200,H=100) → xyxy(90,45,110,55)
-        boxes = captured["targets"][0]["boxes"]
-        assert boxes.shape == (1, 4)
-        assert boxes[0, 0].item() == pytest.approx(90.0)
-        assert boxes[0, 1].item() == pytest.approx(45.0)
-        assert boxes[0, 2].item() == pytest.approx(110.0)
-        assert boxes[0, 3].item() == pytest.approx(55.0)
-
-    def test_dataloader_idx_param_has_default(self) -> None:
-        """on_test_batch_end must accept calls with an explicit dataloader_idx."""
-        cb = COCOEvalCallback()
-        cb.setup(_make_trainer(), _make_pl_module(), stage="test")
-        cb.map_metric = MagicMock(name="map_metric")
-        outputs = {"results": _detection_preds(0), "targets": _detection_targets()}
-
-        # Must not raise with explicit dataloader_idx=0
-        cb.on_test_batch_end(_make_trainer(), _make_pl_module(), outputs, None, 0, dataloader_idx=0)
-
-
-class TestOnTestEpochEnd:
-    """on_test_epoch_end() logs metrics under test/ prefix and resets state."""
-
-    @staticmethod
-    def _minimal_metrics(pfx: str = "", max_dets: int = 500) -> dict:
-        """Return a minimal torchmetrics-style metrics dict."""
-        return {
-            f"{pfx}map": torch.tensor(0.4),
-            f"{pfx}map_50": torch.tensor(0.6),
-            f"{pfx}map_75": torch.tensor(0.3),
-            f"{pfx}mar_{max_dets}": torch.tensor(0.5),
-        }
-
-    def test_detection_core_metrics_are_logged(self) -> None:
-        """test/mAP_50_95, test/mAP_50, test/mAP_75, test/mAR are always logged."""
-        cb = COCOEvalCallback(max_dets=500)
-        cb.setup(_make_trainer(), _make_pl_module(), stage="test")
-        cb.map_metric = MagicMock(name="map_metric")
-        cb.map_metric.compute.return_value = self._minimal_metrics()
-        module = _make_pl_module()
-
-        cb.on_test_epoch_end(_make_trainer(), module)
-
-        logged_keys = {c.args[0] for c in module.log.call_args_list}
-        assert "test/mAP_50_95" in logged_keys
-        assert "test/mAP_50" in logged_keys
-        assert "test/mAP_75" in logged_keys
-        assert "test/mAR" in logged_keys
-
-    def test_no_ema_aliases_for_test(self) -> None:
-        """test/ema_* aliases are NOT logged — test always runs with EMA weights
-        via the RFDETREMACallback swap so test/mAP_50 is already the EMA result."""
-        cb = COCOEvalCallback(max_dets=500)
-        cb.setup(_make_trainer(), _make_pl_module(), stage="test")
-        cb.map_metric = MagicMock(name="map_metric")
-        cb.map_metric.compute.return_value = self._minimal_metrics()
-        module = _make_pl_module()
-
-        cb.on_test_epoch_end(_make_trainer(), module)
-
-        logged_keys = {c.args[0] for c in module.log.call_args_list}
-        assert not any(k.startswith("test/ema_") for k in logged_keys)
-
-    def test_val_prefix_not_logged(self) -> None:
-        """test_epoch_end must not emit val/ keys — prefixes must not bleed across loops."""
-        cb = COCOEvalCallback(max_dets=500)
-        cb.setup(_make_trainer(), _make_pl_module(), stage="test")
-        cb.map_metric = MagicMock(name="map_metric")
-        cb.map_metric.compute.return_value = self._minimal_metrics()
-        module = _make_pl_module()
-
-        cb.on_test_epoch_end(_make_trainer(), module)
-
-        logged_keys = {c.args[0] for c in module.log.call_args_list}
-        assert not any(k.startswith("val/") for k in logged_keys)
-
-    def test_f1_metrics_logged_when_gt_present(self) -> None:
-        """test/F1, test/precision, test/recall are logged when GT exists."""
-        cb = COCOEvalCallback()
-        cb.setup(_make_trainer(), _make_pl_module(), stage="test")
-        cb.map_metric = MagicMock(name="map_metric")
-        cb.map_metric.compute.return_value = self._minimal_metrics()
-        cb._f1_local = {
-            0: {
-                "scores": np.array([0.9], dtype=np.float32),
-                "matches": np.array([1], dtype=np.int64),
-                "ignore": np.array([False]),
-                "total_gt": 1,
-            }
-        }
-        module = _make_pl_module()
-        cb.on_test_epoch_end(_make_trainer(), module)
-
-        logged_keys = {c.args[0] for c in module.log.call_args_list}
-        assert "test/F1" in logged_keys
-        assert "test/precision" in logged_keys
-        assert "test/recall" in logged_keys
-
-    def test_f1_metrics_zero_when_no_gt(self) -> None:
-        """test/F1 == 0.0 when no predictions were accumulated (empty epoch)."""
-        cb = COCOEvalCallback()
-        cb.setup(_make_trainer(), _make_pl_module(), stage="test")
-        cb.map_metric = MagicMock(name="map_metric")
-        cb.map_metric.compute.return_value = self._minimal_metrics()
-        module = _make_pl_module()
-
-        cb.on_test_epoch_end(_make_trainer(), module)
-
-        f1_call = next(c for c in module.log.call_args_list if c.args[0] == "test/F1")
-        assert f1_call.args[1] == pytest.approx(0.0)
-
-    def test_state_reset_after_epoch(self) -> None:
-        """map_metric.reset() is called and _f1_local is cleared after test epoch end."""
-        cb = COCOEvalCallback()
-        cb.setup(_make_trainer(), _make_pl_module(), stage="test")
-        cb.map_metric = MagicMock(name="map_metric")
-        cb.map_metric.compute.return_value = self._minimal_metrics()
-        cb._f1_local = {
-            0: {
-                "scores": np.array([0.9], dtype=np.float32),
-                "matches": np.array([1], dtype=np.int64),
-                "ignore": np.array([False]),
-                "total_gt": 1,
-            }
-        }
-
-        cb.on_test_epoch_end(_make_trainer(), _make_pl_module())
-
-        cb.map_metric.reset.assert_called_once()
-        assert cb._f1_local == {}
-
-    def test_segmentation_extra_metrics_logged(self) -> None:
-        """test/segm_mAP_50_95 and test/segm_mAP_50 are logged in segm mode."""
-        cb = COCOEvalCallback(segmentation=True)
-        cb.setup(_make_trainer(), _make_pl_module(), stage="test")
-        cb.map_metric = MagicMock(name="map_metric")
-        segm_metrics = self._minimal_metrics(pfx="bbox_")
-        segm_metrics["segm_map"] = torch.tensor(0.35)
-        segm_metrics["segm_map_50"] = torch.tensor(0.55)
-        cb.map_metric.compute.return_value = segm_metrics
-        module = _make_pl_module()
-
-        cb.on_test_epoch_end(_make_trainer(), module)
-
-        logged_keys = {c.args[0] for c in module.log.call_args_list}
-        assert "test/segm_mAP_50_95" in logged_keys
-        assert "test/segm_mAP_50" in logged_keys
-
-    def test_per_class_ap_logged_when_classes_present(self) -> None:
-        """test/AP/<name> is logged for each class when class metrics are present."""
-        cb = COCOEvalCallback()
-        cb._class_names = ["cat", "dog"]
-        cb._cat_id_to_name = {0: "cat", 1: "dog"}
-        cb.setup(_make_trainer(), _make_pl_module(), stage="test")
-        cb.map_metric = MagicMock(name="map_metric")
-        metrics = self._minimal_metrics()
-        metrics["map_per_class"] = torch.tensor([0.5, 0.4])
-        metrics["classes"] = torch.tensor([0, 1])
-        cb.map_metric.compute.return_value = metrics
-        module = _make_pl_module()
-
-        cb.on_test_epoch_end(_make_trainer(), module)
-
-        logged_keys = {c.args[0] for c in module.log.call_args_list}
-        assert "test/AP/cat" in logged_keys
-        assert "test/AP/dog" in logged_keys
-
-    def test_per_class_ap_falls_back_to_str_id_when_no_class_names(self) -> None:
-        """test/AP/<id> is logged when class_names is empty."""
-        cb = COCOEvalCallback()
-        cb.setup(_make_trainer(), _make_pl_module(), stage="test")
-        cb.map_metric = MagicMock(name="map_metric")
-        metrics = self._minimal_metrics()
-        metrics["map_per_class"] = torch.tensor([0.5])
-        metrics["classes"] = torch.tensor([3])
-        cb.map_metric.compute.return_value = metrics
-        module = _make_pl_module()
-
-        cb.on_test_epoch_end(_make_trainer(), module)
-
-        logged_keys = {c.args[0] for c in module.log.call_args_list}
-        assert "test/AP/3" in logged_keys

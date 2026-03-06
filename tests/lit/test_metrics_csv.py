@@ -24,106 +24,17 @@ import pandas as pd
 import pytest
 import torch
 import torch.nn as nn
-import torch.utils.data
 
 from rfdetr.config import RFDETRBaseConfig, TrainConfig
 from rfdetr.lit import build_trainer
 from rfdetr.lit.datamodule import RFDETRDataModule
 from rfdetr.lit.module import RFDETRModule
 
+from .helpers import _fake_postprocess, _FakeCriterion, _FakeDataset, _make_param_dicts, _TinyModel
+
 # ---------------------------------------------------------------------------
-# Fakes (minimal, mirrors test_trainer_smoke.py)
+# Helpers local to this module
 # ---------------------------------------------------------------------------
-
-
-class _TinyModel(nn.Module):
-    """Single-parameter model so the optimizer and loss have a gradient path."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.dummy = nn.Parameter(torch.zeros(1))
-
-    def forward(self, samples, targets=None):
-        return {"dummy": self.dummy}
-
-    def update_drop_path(self, *a, **kw) -> None:
-        pass
-
-    def update_dropout(self, *a, **kw) -> None:
-        pass
-
-    def reinitialize_detection_head(self, *a, **kw) -> None:
-        pass
-
-
-class _FakeCriterion:
-    """Criterion that returns a loss connected to the model output."""
-
-    weight_dict = {"loss_ce": 1.0}
-
-    def __call__(self, outputs, targets):
-        dummy = outputs.get("dummy", torch.zeros(1))
-        return {"loss_ce": dummy.mean()}
-
-
-class _FakeDataset(torch.utils.data.Dataset):
-    def __init__(self, length: int = 20) -> None:
-        self._length = length
-
-    def __len__(self) -> int:
-        return self._length
-
-    def __getitem__(self, idx):
-        image = torch.randn(3, 32, 32)
-        target = {
-            "boxes": torch.tensor([[0.5, 0.5, 0.1, 0.1]]),
-            "labels": torch.tensor([1]),
-            "image_id": torch.tensor(idx),
-            "orig_size": torch.tensor([32, 32]),
-            "size": torch.tensor([32, 32]),
-        }
-        return image, target
-
-
-def _fake_postprocess(outputs, orig_sizes):
-    """Return a non-empty prediction so COCOEvalCallback has something to score."""
-    n = orig_sizes.shape[0]
-    return [
-        {
-            "boxes": torch.tensor([[5.0, 5.0, 20.0, 20.0]]),
-            "scores": torch.tensor([0.9]),
-            "labels": torch.tensor([1]),
-        }
-        for _ in range(n)
-    ]
-
-
-def _make_param_dicts(model: nn.Module) -> list[dict]:
-    return [{"params": p, "lr": 1e-4} for p in model.parameters() if p.requires_grad]
-
-
-def _base_mc(**kw) -> RFDETRBaseConfig:
-    defaults = dict(pretrain_weights=None, device="cpu", num_classes=3)
-    defaults.update(kw)
-    return RFDETRBaseConfig(**defaults)
-
-
-def _base_tc(tmp_path, **kw) -> TrainConfig:
-    defaults = dict(
-        dataset_dir=str(tmp_path / "ds"),
-        output_dir=str(tmp_path / "out"),
-        epochs=1,
-        batch_size=2,
-        multi_scale=False,
-        expanded_scales=False,
-        do_random_resize_via_padding=False,
-        grad_accum_steps=1,
-        drop_path=0.0,
-        num_workers=0,
-        tensorboard=False,
-    )
-    defaults.update(kw)
-    return TrainConfig(**defaults)
 
 
 def _fit_and_read_csv(mc: RFDETRBaseConfig, tc: TrainConfig, criterion=None) -> pd.DataFrame:
@@ -190,10 +101,10 @@ _REQUIRED_DETECTION_EMA = _REQUIRED_DETECTION | frozenset(
 class TestDetectionMetricsCSV:
     """metrics.csv contains all columns that plot_metrics() needs for detection."""
 
-    def test_base_metrics_present_without_ema(self, tmp_path):
+    def test_base_metrics_present_without_ema(self, base_model_config, base_train_config):
         """Without EMA all core val/* columns must appear in metrics.csv with non-NaN data."""
-        mc = _base_mc()
-        tc = _base_tc(tmp_path, use_ema=False, run_test=False)
+        mc = base_model_config()
+        tc = base_train_config(use_ema=False, run_test=False)
         df = _fit_and_read_csv(mc, tc)
 
         missing = _REQUIRED_DETECTION - set(df.columns)
@@ -202,10 +113,10 @@ class TestDetectionMetricsCSV:
         all_nan = {c for c in _REQUIRED_DETECTION if df[c].isna().all()}
         assert not all_nan, f"Columns with all-NaN values: {sorted(all_nan)}"
 
-    def test_ema_metrics_present_with_ema_enabled(self, tmp_path):
+    def test_ema_metrics_present_with_ema_enabled(self, base_model_config, base_train_config):
         """With use_ema=True the ema_* aliases must also appear in metrics.csv."""
-        mc = _base_mc()
-        tc = _base_tc(tmp_path, use_ema=True, run_test=False)
+        mc = base_model_config()
+        tc = base_train_config(use_ema=True, run_test=False)
         df = _fit_and_read_csv(mc, tc)
 
         missing = _REQUIRED_DETECTION_EMA - set(df.columns)
@@ -214,7 +125,7 @@ class TestDetectionMetricsCSV:
         all_nan = {c for c in _REQUIRED_DETECTION_EMA if df[c].isna().all()}
         assert not all_nan, f"EMA columns with all-NaN values: {sorted(all_nan)}"
 
-    def test_train_loss_is_unscaled(self, tmp_path):
+    def test_train_loss_is_unscaled(self, base_model_config, base_train_config):
         """train/loss must be logged at the raw criterion scale, not divided by grad_accum_steps.
 
         With grad_accum_steps=4 the old code divided the logged value by 4,
@@ -233,8 +144,8 @@ class TestDetectionMetricsCSV:
                 dummy = outputs.get("dummy", torch.zeros(1))
                 return {"loss_ce": dummy.mean() * 0 + FIXED_LOSS}
 
-        mc = _base_mc()
-        tc = _base_tc(tmp_path, use_ema=False, run_test=False, grad_accum_steps=GRAD_ACCUM)
+        mc = base_model_config()
+        tc = base_train_config(use_ema=False, run_test=False, grad_accum_steps=GRAD_ACCUM)
         df = _fit_and_read_csv(mc, tc, criterion=_FixedCriterion())
 
         logged = df["train/loss"].dropna().mean()

@@ -19,152 +19,25 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 import torch.nn as nn
-import torch.utils.data
 from pytorch_lightning import Trainer
 
-from rfdetr.config import RFDETRBaseConfig, SegmentationTrainConfig, TrainConfig
+from rfdetr.config import SegmentationTrainConfig
 from rfdetr.lit import build_trainer
 from rfdetr.lit.datamodule import RFDETRDataModule
 from rfdetr.lit.module import RFDETRModule
 
+from .helpers import (
+    _fake_postprocess,
+    _FakeCriterion,
+    _FakeDataset,
+    _FakeDatasetWithMasks,
+    _make_param_dicts,
+    _TinyModel,
+)
+
 # ---------------------------------------------------------------------------
-# Private helpers
+# Private helpers unique to smoke tests
 # ---------------------------------------------------------------------------
-
-
-def _base_mc(**overrides):
-    """Return a minimal RFDETRBaseConfig with pretrain_weights disabled."""
-    defaults = dict(pretrain_weights=None, device="cpu", num_classes=3)
-    defaults.update(overrides)
-    return RFDETRBaseConfig(**defaults)
-
-
-def _base_tc(tmp_path, **overrides):
-    """Return a minimal detection TrainConfig suitable for smoke tests."""
-    defaults = dict(
-        dataset_dir=str(tmp_path / "ds"),
-        output_dir=str(tmp_path / "out"),
-        epochs=1,
-        batch_size=2,
-        multi_scale=False,
-        expanded_scales=False,
-        do_random_resize_via_padding=False,
-        grad_accum_steps=1,
-        drop_path=0.0,
-        num_workers=0,
-        tensorboard=False,
-    )
-    defaults.update(overrides)
-    return TrainConfig(**defaults)
-
-
-def _base_seg_tc(tmp_path, **overrides):
-    """Return a minimal SegmentationTrainConfig suitable for smoke tests."""
-    defaults = dict(
-        dataset_dir=str(tmp_path / "ds"),
-        output_dir=str(tmp_path / "out"),
-        epochs=1,
-        batch_size=2,
-        multi_scale=False,
-        expanded_scales=False,
-        do_random_resize_via_padding=False,
-        grad_accum_steps=1,
-        drop_path=0.0,
-        num_workers=0,
-        tensorboard=False,
-    )
-    defaults.update(overrides)
-    return SegmentationTrainConfig(**defaults)
-
-
-class _TinyModel(nn.Module):
-    """Minimal real nn.Module that satisfies the RFDETRModule model contract.
-
-    Has a single trainable parameter so the optimizer has something to update
-    and the loss has a gradient path back through the model.
-    """
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.dummy = nn.Parameter(torch.zeros(1))
-
-    def forward(self, samples, targets=None):
-        return {"dummy": self.dummy}
-
-    def update_drop_path(self, *args, **kwargs) -> None:
-        pass
-
-    def update_dropout(self, *args, **kwargs) -> None:
-        pass
-
-    def reinitialize_detection_head(self, *args, **kwargs) -> None:
-        pass
-
-
-class _FakeCriterion:
-    """Callable criterion that returns a loss connected to the model output.
-
-    Keeps a gradient path from the loss back to _TinyModel.dummy so that
-    loss.backward() does not error when the Trainer calls it.
-    """
-
-    weight_dict = {"loss_ce": 1.0}
-
-    def __call__(self, outputs, targets):
-        dummy = outputs.get("dummy", torch.zeros(1))
-        return {"loss_ce": dummy.mean()}
-
-
-class _FakeDataset(torch.utils.data.Dataset):
-    """Dataset with a working __getitem__ that returns (image, target) pairs.
-
-    The image is a (3, 32, 32) float tensor; the target dict includes the
-    fields expected by RFDETRModule (boxes, labels, image_id, orig_size).
-    """
-
-    def __init__(self, length: int = 20) -> None:
-        self._length = length
-
-    def __len__(self) -> int:
-        return self._length
-
-    def __getitem__(self, idx):
-        image = torch.randn(3, 32, 32)
-        target = {
-            "boxes": torch.tensor([[0.5, 0.5, 0.1, 0.1]]),
-            "labels": torch.tensor([1]),
-            "image_id": torch.tensor(idx),
-            "orig_size": torch.tensor([32, 32]),
-            "size": torch.tensor([32, 32]),
-        }
-        return image, target
-
-
-class _FakeDatasetWithMasks(_FakeDataset):
-    """Like _FakeDataset but includes binary instance masks (for segmentation)."""
-
-    def __getitem__(self, idx):
-        image, target = super().__getitem__(idx)
-        target["masks"] = torch.zeros(1, 32, 32, dtype=torch.bool)
-        return image, target
-
-
-def _fake_postprocess(outputs, orig_sizes):
-    """Postprocessor returning empty detection lists — one dict per image."""
-    n = orig_sizes.shape[0]
-    return [
-        {
-            "boxes": torch.zeros(0, 4),
-            "scores": torch.zeros(0),
-            "labels": torch.zeros(0, dtype=torch.long),
-        }
-        for _ in range(n)
-    ]
-
-
-def _make_param_dicts(model: nn.Module):
-    """Build a minimal param-dict list for AdamW from all trainable parameters."""
-    return [{"params": p, "lr": 1e-4} for p in model.parameters() if p.requires_grad]
 
 
 def _make_trainer() -> Trainer:
@@ -186,10 +59,10 @@ def _make_trainer() -> Trainer:
 class TestDetectionSmoke:
     """Trainer(fast_dev_run=2).fit() must complete without error for detection."""
 
-    def test_fit_runs_without_error(self, tmp_path):
+    def test_fit_runs_without_error(self, base_model_config, base_train_config):
         """Full PTL fit loop runs 2 train + 2 val batches without raising."""
-        mc = _base_mc()
-        tc = _base_tc(tmp_path)
+        mc = base_model_config()
+        tc = base_train_config()
 
         tiny_model = _TinyModel()
         fake_criterion = _FakeCriterion()
@@ -212,10 +85,10 @@ class TestDetectionSmoke:
             datamodule = RFDETRDataModule(mc, tc)
             _make_trainer().fit(module, datamodule)
 
-    def test_training_step_called_expected_times(self, tmp_path):
+    def test_training_step_called_expected_times(self, base_model_config, base_train_config):
         """fast_dev_run=2 must run exactly 2 training steps."""
-        mc = _base_mc()
-        tc = _base_tc(tmp_path)
+        mc = base_model_config()
+        tc = base_train_config()
 
         tiny_model = _TinyModel()
         fake_criterion = _FakeCriterion()
@@ -249,10 +122,10 @@ class TestDetectionSmoke:
 
         assert sum(call_count) == 2
 
-    def test_val_step_called_expected_times(self, tmp_path):
+    def test_val_step_called_expected_times(self, base_model_config, base_train_config):
         """fast_dev_run=2 must run exactly 2 validation steps."""
-        mc = _base_mc()
-        tc = _base_tc(tmp_path)
+        mc = base_model_config()
+        tc = base_train_config()
 
         tiny_model = _TinyModel()
         fake_criterion = _FakeCriterion()
@@ -286,10 +159,10 @@ class TestDetectionSmoke:
 
         assert sum(call_count) == 2
 
-    def test_loss_decreases_or_is_finite(self, tmp_path):
+    def test_loss_decreases_or_is_finite(self, base_model_config, base_train_config):
         """Training loss must be finite (not NaN/inf) for the run to be valid."""
-        mc = _base_mc()
-        tc = _base_tc(tmp_path)
+        mc = base_model_config()
+        tc = base_train_config()
 
         tiny_model = _TinyModel()
         fake_postprocess = MagicMock(side_effect=_fake_postprocess)
@@ -329,10 +202,10 @@ class TestDetectionSmoke:
 class TestSegmentationSmoke:
     """Trainer(fast_dev_run=2).fit() must complete without error for segmentation."""
 
-    def test_fit_runs_without_error(self, tmp_path):
+    def test_fit_runs_without_error(self, base_model_config, seg_train_config):
         """Full PTL fit loop runs 2 train + 2 val batches without raising."""
-        mc = _base_mc(segmentation_head=True)
-        tc = _base_seg_tc(tmp_path)
+        mc = base_model_config(segmentation_head=True)
+        tc = seg_train_config()
 
         tiny_model = _TinyModel()
         fake_criterion = _FakeCriterion()
@@ -355,10 +228,10 @@ class TestSegmentationSmoke:
             datamodule = RFDETRDataModule(mc, tc)
             _make_trainer().fit(module, datamodule)
 
-    def test_segmentation_config_accepted(self, tmp_path):
+    def test_segmentation_config_accepted(self, base_model_config, seg_train_config):
         """SegmentationTrainConfig must be accepted by both module and datamodule."""
-        mc = _base_mc(segmentation_head=True)
-        tc = _base_seg_tc(tmp_path)
+        mc = base_model_config(segmentation_head=True)
+        tc = seg_train_config()
 
         with (
             patch("rfdetr.lit.module.build_model", return_value=_TinyModel()),
@@ -387,10 +260,10 @@ class TestBuildTrainerSmoke:
     dataset or GPU is required.
     """
 
-    def test_fit_via_build_trainer(self, tmp_path):
+    def test_fit_via_build_trainer(self, base_model_config, base_train_config):
         """build_trainer() + trainer.fit(module, datamodule=datamodule) must not raise."""
-        mc = _base_mc()
-        tc = _base_tc(tmp_path, use_ema=False, run_test=False)
+        mc = base_model_config()
+        tc = base_train_config(use_ema=False, run_test=False)
 
         with (
             patch("rfdetr.lit.module.build_model", return_value=_TinyModel()),

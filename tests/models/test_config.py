@@ -314,15 +314,15 @@ class TestBuildTrainerUsesRealFields:
         trainer = build_trainer(self._tc(tmp_path, clip_max_norm=0.25), self._mc())
         assert trainer.gradient_clip_val == pytest.approx(0.25)
 
-    def test_seed_forwarded(self, tmp_path):
-        """seed_everything is called with the value from TrainConfig.seed."""
+    def test_seed_not_applied_in_build_trainer_factory(self, tmp_path):
+        """Seeding is deferred to RFDETRModule.on_fit_start, not build_trainer()."""
         import unittest.mock as mock
 
-        from rfdetr.lit import build_trainer, seed_everything
+        from rfdetr.lit import build_trainer
 
         with mock.patch("rfdetr.lit.seed_everything") as mock_seed:
             build_trainer(self._tc(tmp_path, seed=99), self._mc())
-        mock_seed.assert_called_once_with(99, workers=True)
+        mock_seed.assert_not_called()
 
     def test_sync_bn_forwarded_to_trainer(self, tmp_path):
         """sync_batchnorm=True is passed to Trainer when TrainConfig.sync_bn is True."""

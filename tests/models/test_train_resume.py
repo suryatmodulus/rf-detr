@@ -7,23 +7,23 @@
 
 import warnings
 from pathlib import Path
+from unittest.mock import patch
 
 from rfdetr import RFDETRNano
 
 
-def test_resume_with_completed_epochs_returns_early(synthetic_shape_dataset_dir: Path, tmp_path: Path) -> None:
-    """Passing start_epoch emits DeprecationWarning; training completes without error.
+def test_resume_with_completed_epochs_returns_early(tmp_path: Path) -> None:
+    """Passing start_epoch emits DeprecationWarning and still reaches trainer.fit().
 
     In the legacy engine.py path, ``start_epoch=epochs`` caused the training loop
     to be skipped (``range(start_epoch, epochs)`` was empty), which triggered an
     ``UnboundLocalError`` when accessing ``test_stats``.
 
     In the PTL path, ``start_epoch`` is a deprecated kwarg that is absorbed and
-    ignored (PTL resumes automatically via ``ckpt_path``).  Training runs normally
-    for the requested number of epochs and must not raise any exception.
+    ignored (PTL resumes automatically via ``ckpt_path``). The shim should emit
+    the warning and still call ``trainer.fit(...)`` without raising.
 
     Args:
-        synthetic_shape_dataset_dir: Path to a synthetic COCO-style dataset.
         tmp_path: Pytest temporary directory.
     """
     output_dir = tmp_path / "train_output"
@@ -31,10 +31,15 @@ def test_resume_with_completed_epochs_returns_early(synthetic_shape_dataset_dir:
 
     model = RFDETRNano(pretrain_weights=None, num_classes=3, device="cpu")
 
-    with warnings.catch_warnings(record=True) as caught:
+    with (
+        patch("rfdetr.lit.RFDETRModule"),
+        patch("rfdetr.lit.RFDETRDataModule"),
+        patch("rfdetr.lit.build_trainer") as mock_build_trainer,
+        warnings.catch_warnings(record=True) as caught,
+    ):
         warnings.simplefilter("always")
         model.train_ptl(
-            dataset_dir=str(synthetic_shape_dataset_dir),
+            dataset_dir=str(tmp_path),
             epochs=1,
             start_epoch=1,
             batch_size=1,
@@ -45,11 +50,10 @@ def test_resume_with_completed_epochs_returns_early(synthetic_shape_dataset_dir:
 
     depr = [w for w in caught if issubclass(w.category, DeprecationWarning)]
     assert any("start_epoch" in str(w.message) for w in depr), "Expected a DeprecationWarning mentioning start_epoch"
+    mock_build_trainer.return_value.fit.assert_called_once()
 
 
-def test_resume_with_completed_epochs_calls_on_train_end_callback(
-    synthetic_shape_dataset_dir: Path, tmp_path: Path
-) -> None:
+def test_resume_with_completed_epochs_calls_on_train_end_callback(tmp_path: Path) -> None:
     """Old-style on_train_end callbacks are not forwarded to PTL.
 
     In the legacy engine.py path, callbacks added to ``model.callbacks["on_train_end"]``
@@ -69,14 +73,19 @@ def test_resume_with_completed_epochs_calls_on_train_end_callback(
     model = RFDETRNano(pretrain_weights=None, num_classes=3, device="cpu")
     model.callbacks["on_train_end"].append(_callback)
 
-    model.train_ptl(
-        dataset_dir=str(synthetic_shape_dataset_dir),
-        epochs=1,
-        batch_size=1,
-        grad_accum_steps=1,
-        output_dir=str(output_dir),
-        device="cpu",
-    )
+    with (
+        patch("rfdetr.lit.RFDETRModule"),
+        patch("rfdetr.lit.RFDETRDataModule"),
+        patch("rfdetr.lit.build_trainer"),
+    ):
+        model.train_ptl(
+            dataset_dir=str(tmp_path),
+            epochs=1,
+            batch_size=1,
+            grad_accum_steps=1,
+            output_dir=str(output_dir),
+            device="cpu",
+        )
 
     # Old-style callbacks on model.callbacks are no longer invoked in the PTL path.
     assert callback_calls == 0

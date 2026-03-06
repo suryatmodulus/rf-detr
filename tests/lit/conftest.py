@@ -56,6 +56,7 @@ def base_train_config(tmp_path):
             expanded_scales=False,
             do_random_resize_via_padding=False,
             grad_accum_steps=1,
+            num_workers=0,
             tensorboard=False,
         )
         defaults.update(overrides)
@@ -76,6 +77,13 @@ def seg_train_config(tmp_path):
             dataset_dir=str(tmp_path / "dataset"),
             output_dir=str(tmp_path / "output"),
             epochs=10,
+            batch_size=2,
+            multi_scale=False,
+            expanded_scales=False,
+            do_random_resize_via_padding=False,
+            grad_accum_steps=1,
+            drop_path=0.0,
+            num_workers=0,
             tensorboard=False,
         )
         defaults.update(overrides)

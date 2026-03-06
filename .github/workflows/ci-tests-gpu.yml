@@ -4,7 +4,7 @@ on:
   push:
     # Appending "migration" branch to trigger GPU tests for migration work
     #  since draft PRs don't trigger GPU tests, but we want to run them...
-    branches: ["main", "release/*", "develop", "migration"]
+    branches: ["main", "release/*", "develop"]
   pull_request:
     branches: ["main", "release/*", "develop"]
     types: [opened, synchronize, reopened, ready_for_review]
@@ -57,7 +57,9 @@ jobs:
           -m gpu \
           -n 3 \
           --reruns 1 --only-rerun "OutOfMemoryError" \
-          --cov=rfdetr --cov-report=xml
+          --cov=rfdetr --cov-report=xml \
+          --timeout=600 \
+          --durations=20
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v5

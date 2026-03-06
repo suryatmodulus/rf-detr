@@ -28,7 +28,7 @@ jobs:
   run-tests:
     name: Testing
     # needs: build  # todo: consider using this build package for testing
-    timeout-minutes: 30
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -60,7 +60,9 @@ jobs:
           uv run --no-sync pytest src/ tests/ \
             -n 2 -m "not gpu" \
             --ignore=tests/try_instantiate_all_models.py \
-            --cov=rfdetr --cov-report=xml
+            --cov=rfdetr --cov-report=xml \
+            --timeout=240 \
+            --durations=50
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v5

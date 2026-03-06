@@ -73,9 +73,6 @@ def build_trainer(
     """
     tc = train_config
 
-    if tc.seed is not None:
-        seed_everything(tc.seed, workers=True)
-
     # --- Precision resolution ---
     def _resolve_precision() -> str:
         if not model_config.amp:
@@ -210,7 +207,7 @@ def build_trainer(
     trainer_config: dict[str, Any] = {
         "max_epochs": tc.epochs,
         "accelerator": accelerator,
-        "devices": "auto",
+        "devices": 1,
         "strategy": strategy,
         "precision": _resolve_precision(),
         "accumulate_grad_batches": tc.grad_accum_steps,

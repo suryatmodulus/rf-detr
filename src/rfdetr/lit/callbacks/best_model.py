@@ -110,7 +110,10 @@ class BestModelCallback(ModelCheckpoint):
             return
         pl_module = self._current_pl_module
         if pl_module is None:
-            raise RuntimeError("BestModelCallback._save_checkpoint called before pl_module was set.")
+            raise RuntimeError(
+                f"BestModelCallback._save_checkpoint called with filepath={filepath!r} "
+                f"at epoch={trainer.current_epoch} but pl_module was not set."
+            )
         pth_path = Path(filepath)
         pth_path.parent.mkdir(parents=True, exist_ok=True)
         # Validation metrics are produced with EMA weights when the EMA callback
@@ -297,7 +300,7 @@ class RFDETREarlyStopping(EarlyStopping):
         if self._use_ema and ema_val is not None:
             effective = ema_val
         elif regular_val is not None and ema_val is not None:
-            effective = ema_val if self._use_ema else max(regular_val, ema_val)
+            effective = max(regular_val, ema_val)
         elif ema_val is not None:
             effective = ema_val
         else:
