@@ -24,6 +24,7 @@ from rfdetr.datasets.coco import compute_multi_scale_scales
 from rfdetr.models.lwdetr import build_criterion_and_postprocessors, build_model
 from rfdetr.training.param_groups import get_param_dict
 from rfdetr.utilities.logger import get_logger
+from rfdetr.utilities.state_dict import validate_checkpoint_compatibility
 
 logger = get_logger()
 
@@ -114,6 +115,8 @@ class RFDETRModule(LightningModule):
 
         if "args" in checkpoint and hasattr(checkpoint["args"], "class_names"):
             self._pretrain_class_names = checkpoint["args"].class_names
+
+        validate_checkpoint_compatibility(checkpoint, args)
 
         checkpoint_num_classes = checkpoint["model"]["class_embed.bias"].shape[0]
         if checkpoint_num_classes != args.num_classes + 1:
