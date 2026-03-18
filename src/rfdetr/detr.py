@@ -329,6 +329,14 @@ class RFDETR:
 
         # Sync the trained weights back so predict() / export() see the updated model.
         self.model.model = module.model
+        # Sync class names: prefer explicit config.class_names, otherwise fall back to dataset (#509).
+        config_class_names = getattr(config, "class_names", None)
+        if config_class_names is not None:
+            self.model.class_names = config_class_names
+        else:
+            dataset_class_names = getattr(datamodule, "class_names", None)
+            if dataset_class_names is not None:
+                self.model.class_names = dataset_class_names
 
     def optimize_for_inference(self, compile=True, batch_size=1, dtype=torch.float32):
         self.remove_optimized_model()
@@ -545,7 +553,7 @@ class RFDETR:
         Returns:
             dict: A dictionary mapping class IDs to class names. The keys are integers starting from
         """
-        if hasattr(self.model, "class_names") and self.model.class_names:
+        if hasattr(self.model, "class_names") and self.model.class_names is not None:
             return {i + 1: name for i, name in enumerate(self.model.class_names)}
 
         return COCO_CLASSES
