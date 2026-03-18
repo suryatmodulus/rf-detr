@@ -137,11 +137,9 @@ def _load_pretrain_weights_into(nn_model: torch.nn.Module, args: Any) -> List[st
 
     checkpoint_num_classes = checkpoint["model"]["class_embed.bias"].shape[0]
     if checkpoint_num_classes != args.num_classes + 1:
-        logger.warning(
-            "Reinitializing detection head: checkpoint has %d classes, configured for %d.",
-            checkpoint_num_classes - 1,
-            args.num_classes,
-        )
+        # Temporarily align the detection head size with the checkpoint so
+        # that state_dict loading succeeds even when the configured
+        # num_classes differs from the checkpoint.
         nn_model.reinitialize_detection_head(checkpoint_num_classes)
 
     num_desired_queries = args.num_queries * args.group_detr
@@ -152,7 +150,9 @@ def _load_pretrain_weights_into(nn_model: torch.nn.Module, args: Any) -> List[st
 
     nn_model.load_state_dict(checkpoint["model"], strict=False)
 
-    if checkpoint_num_classes != args.num_classes + 1:
+    # Only reinitialize back to configured size when intentionally reducing a
+    # larger pretrain checkpoint to fewer task-specific classes.
+    if args.num_classes + 1 < checkpoint_num_classes:
         nn_model.reinitialize_detection_head(args.num_classes + 1)
 
     return class_names
