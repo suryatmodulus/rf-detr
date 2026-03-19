@@ -12,7 +12,7 @@ import warnings
 from collections import defaultdict
 from copy import deepcopy
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, List, Optional, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 
 import numpy as np
 import requests
@@ -80,7 +80,7 @@ class _ModelContext:
         device: torch.device,
         resolution: int,
         args: Any,
-        class_names: List[str] = None,
+        class_names: Optional[List[str]] = None,
     ) -> None:
         self.model = model
         self.postprocess = postprocess
@@ -395,7 +395,7 @@ class RFDETR:
         self._optimized_has_been_compiled = False
         self._optimized_batch_size = None
         self._optimized_resolution = None
-        self._optimized_half = False
+        self._optimized_dtype = None
 
     def export(
         self,
@@ -574,12 +574,15 @@ class RFDETR:
 
     # Get class_names from the model
     @property
-    def class_names(self):
-        """
-        Retrieve the class names supported by the loaded model.
+    def class_names(self) -> Dict[int, str]:
+        """Retrieve the class names supported by the loaded model.
 
         Returns:
-            dict: A dictionary mapping class IDs to class names. The keys are integers starting from
+            A dictionary mapping integer class IDs to class name strings.
+            IDs are 1-indexed and may be non-contiguous (e.g. COCO category
+            IDs have gaps such as 11→13 and 25→27).  When no custom class
+            names are embedded in the checkpoint, returns the standard COCO
+            classes dict.
         """
         if hasattr(self.model, "class_names") and self.model.class_names is not None:
             return {i + 1: name for i, name in enumerate(self.model.class_names)}
@@ -841,13 +844,44 @@ class RFDETRLargeDeprecated(RFDETR):
 class RFDETRLarge(RFDETR):
     size = "rfdetr-large"
 
+    @staticmethod
+    def _should_fallback_to_deprecated_config(exc: Exception) -> bool:
+        """Return whether initialization should retry with deprecated Large config.
+
+        The fallback is only for known checkpoint/config incompatibilities from
+        deprecated Large weights. Runtime issues such as CUDA OOM must fail
+        fast and must not trigger a second initialization attempt.
+
+        Args:
+            exc: Exception raised by initial ``RFDETR`` initialization.
+
+        Returns:
+            ``True`` when retrying with deprecated config is expected to help.
+        """
+        message = str(exc).lower()
+        if "out of memory" in message:
+            return False
+        if isinstance(exc, ValueError):
+            return "patch_size" in message
+        if isinstance(exc, RuntimeError):
+            incompatible_state_dict_markers = (
+                "error(s) in loading state_dict",
+                "size mismatch",
+                "missing key(s) in state_dict",
+                "unexpected key(s) in state_dict",
+            )
+            return any(marker in message for marker in incompatible_state_dict_markers)
+        return False
+
     def __init__(self, **kwargs):
         self.init_error = None
         self.is_deprecated = False
         try:
             super().__init__(**kwargs)
-        except Exception as e:
-            self.init_error = e
+        except (ValueError, RuntimeError) as exc:
+            if not self._should_fallback_to_deprecated_config(exc):
+                raise
+            self.init_error = exc
             self.is_deprecated = True
             try:
                 super().__init__(**kwargs)
