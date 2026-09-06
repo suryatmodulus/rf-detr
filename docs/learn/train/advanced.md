@@ -1,3 +1,7 @@
+---
+description: Advanced RF-DETR training with resume, early stopping, multi-GPU DDP, gradient checkpointing, and memory optimization for large models.
+---
+
 # Advanced Training
 
 This page covers advanced training topics including resuming training, early stopping, multi-GPU training, and memory optimization techniques.
@@ -8,7 +12,7 @@ This page covers advanced training topics including resuming training, early sto
 
 ## Resume Training
 
-You can resume training from a previously saved checkpoint by passing the path to the `checkpoint.pth` file using the `resume` argument. This is useful when training is interrupted or you want to continue fine-tuning an already partially trained model.
+You can resume training from a previously saved full checkpoint by passing the path to `last.ckpt` using the `resume` argument. This is useful when training is interrupted or you want to continue fine-tuning an already partially trained model.
 
 The training loop will automatically load:
 
@@ -16,6 +20,10 @@ The training loop will automatically load:
 - Optimizer state
 - Learning rate scheduler state
 - Training epoch number
+
+!!! warning "Lightweight checkpoints resume without optimizer/scheduler state"
+
+    The above applies to the trainer's own full checkpoints (`last.ckpt`, `checkpoint_<epoch>.ckpt`). The best-model tracker also writes four lighter `.pth` files — `checkpoint_best_regular.pth`, `checkpoint_best_ema.pth`, `checkpoint_best_total.pth`, `last_ema.pth` — that intentionally omit optimizer/scheduler state to stay small. New files with matching configured callbacks can restore callback state (EMA and early stopping). Best-score tracking additionally requires `output_dir` to be the exact directory where the checkpoint was written. Files created before callback-state persistence (or with an empty callback section) restart callback state. The optimizer and LR scheduler always start cold. `resume=` logs the applicable warning; pass a full trainer checkpoint instead if you need optimizer/scheduler continuity.
 
 === "Object Detection"
 
@@ -31,7 +39,7 @@ The training loop will automatically load:
         grad_accum_steps=4,
         lr=1e-4,
         output_dir="output",
-        resume="output/checkpoint.pth",
+        resume="output/last.ckpt",
     )
     ```
 
@@ -49,20 +57,20 @@ The training loop will automatically load:
         grad_accum_steps=4,
         lr=1e-4,
         output_dir="output",
-        resume="output/checkpoint.pth",
+        resume="output/last.ckpt",
     )
     ```
 
 !!! tip "Resume vs Pretrain Weights"
 
-    - Use `resume="checkpoint.pth"` to continue training with optimizer state
+    - Use `resume="last.ckpt"` to continue training with optimizer state
     - Use `pretrain_weights="checkpoint_best_total.pth"` when initializing a model to start fresh training from those weights
 
 ---
 
 ## Early Stopping
 
-Early stopping monitors validation mAP and halts training if improvements remain below a threshold for a set number of epochs. This prevents wasted computation once the model has converged.
+Early stopping monitors the validation task metric selected by `best_model_metric` and halts training if improvements remain below a threshold for a set number of epochs. With the default `best_model_metric="map"`, detection models use box mAP, segmentation models use mask mAP, and keypoint models use COCO keypoint AP. With `best_model_metric="mar"`, detection and segmentation models use box mAR and keypoint models use keypoint mAR; mAR for detection and segmentation is evaluated using the configured `eval_max_dets` limit, while keypoint mAR uses fixed COCO `maxDets=20`.
 
 ### Basic Usage
 
@@ -104,11 +112,12 @@ Early stopping monitors validation mAP and halts training if improvements remain
 
 ### Configuration Options
 
-| Parameter                  | Default | Description                                          |
-| -------------------------- | ------- | ---------------------------------------------------- |
-| `early_stopping_patience`  | 10      | Number of epochs without improvement before stopping |
-| `early_stopping_min_delta` | 0.001   | Minimum mAP change to count as improvement           |
-| `early_stopping_use_ema`   | False   | Use EMA model's mAP for comparisons                  |
+| Parameter                  | Default | Description                                                        |
+| -------------------------- | ------- | ------------------------------------------------------------------ |
+| `early_stopping_patience`  | 10      | Number of epochs without improvement before stopping               |
+| `early_stopping_min_delta` | 0.001   | Minimum metric change to count as improvement                      |
+| `early_stopping_use_ema`   | False   | Use EMA model metrics for comparisons                              |
+| `best_model_metric`        | "map"   | Metric family for best checkpoint / early stopping: "map" or "mar" |
 
 ### Advanced Example
 
@@ -118,26 +127,26 @@ model.train(
     epochs=200,
     early_stopping=True,
     early_stopping_patience=15,  # Wait 15 epochs before stopping
-    early_stopping_min_delta=0.005,  # Require 0.5% mAP improvement
+    early_stopping_min_delta=0.005,  # Require 0.5% validation metric improvement
     early_stopping_use_ema=True,  # Track EMA model performance
 )
 ```
 
 ### How It Works
 
-1. After each epoch, validation mAP is computed
-2. If mAP improves by at least `min_delta`, the patience counter resets
-3. If mAP doesn't improve, the patience counter increments
+1. After each epoch, the validation task metric is computed
+2. If the metric improves by at least `min_delta`, the patience counter resets
+3. If the metric doesn't improve, the patience counter increments
 4. When patience counter reaches `patience`, training stops
 5. The best checkpoint is already saved as `checkpoint_best_total.pth`
 
 ```
-Epoch 10: mAP = 0.450 (best: 0.450) - counter: 0
-Epoch 11: mAP = 0.455 (best: 0.455) - counter: 0 (improved)
-Epoch 12: mAP = 0.454 (best: 0.455) - counter: 1 (no improvement)
-Epoch 13: mAP = 0.453 (best: 0.455) - counter: 2
+Epoch 10: <selected-metric> = 0.450 (best: 0.450) - counter: 0
+Epoch 11: <selected-metric> = 0.455 (best: 0.455) - counter: 0 (improved)
+Epoch 12: <selected-metric> = 0.454 (best: 0.455) - counter: 1 (no improvement)
+Epoch 13: <selected-metric> = 0.453 (best: 0.455) - counter: 2
 ...
-Epoch 22: mAP = 0.452 (best: 0.455) - counter: 10 → STOP
+Epoch 22: <selected-metric> = 0.452 (best: 0.455) - counter: 10 → STOP
 ```
 
 ---
@@ -173,12 +182,9 @@ torchrun --nproc_per_node=4 train.py
 
 !!! warning "Pass `devices=` explicitly"
 
-    `build_trainer()` defaults to `devices=1`. Without overriding this, training silently
-    runs on a single GPU even when `torchrun` launches multiple processes.
+    `build_trainer()` defaults to `devices=1`. Without overriding this, training silently runs on a single GPU even when `torchrun` launches multiple processes.
 
-    Pass `devices="auto"` to use all GPUs visible to the process, or pass an explicit
-    integer (e.g. `devices=4`). These values are forwarded to `build_trainer` via
-    `**trainer_kwargs`:
+    Pass `devices="auto"` to use all GPUs visible to the process, or pass an explicit integer (e.g. `devices=4`). These values are forwarded to `build_trainer` via `**trainer_kwargs`:
 
     ```python
     model.train(
@@ -229,6 +235,37 @@ torchrun \
 
 Run this command on each node, changing `--node_rank` accordingly.
 
+### Keypoint / Pose models
+
+Keypoint models (`RFDETRKeypointPreview`) train under `DistributedDataParallel` on multiple GPUs and multiple nodes exactly like detection models — build a script and launch it with `torchrun`, setting `devices=` (e.g. `"auto"` or an integer like `8`):
+
+```python
+# train_pose.py
+from rfdetr import RFDETRKeypointPreview
+
+model = RFDETRKeypointPreview()
+
+model.train(
+    dataset_dir="path/to/keypoint-dataset",
+    epochs=100,
+    batch_size=2,  # per-GPU batch size
+    grad_accum_steps=1,  # recommended on multi-GPU — see note below
+    lr=1e-4,
+    output_dir="output",
+    devices="auto",  # or devices=8
+)
+```
+
+```bash
+torchrun --nproc_per_node=8 train_pose.py
+```
+
+!!! note "Prefer `grad_accum_steps=1` on multi-GPU for keypoints"
+
+    Keypoint models use **manual optimization** so the per-step box-count loss normalization is computed over the full accumulated batch. As a result, gradients synchronize on **every** microbatch rather than only at the end of an accumulation window. Training with `grad_accum_steps > 1` on multiple GPUs is still numerically correct, but performs one `all_reduce` per microbatch (i.e. `grad_accum_steps`× the necessary communication). For best throughput, scale with more GPUs / a larger per-GPU `batch_size` and keep `grad_accum_steps=1`.
+
+    Sharded strategies (FSDP / DeepSpeed) are **not** supported for keypoint models — use `ddp` (or `strategy="auto"` with `devices > 1`).
+
 ### Advanced multi-GPU options (PTL API)
 
 For fine-grained control over strategy, sync batch norm, precision, and other distributed settings, use the Lightning API directly.
@@ -239,7 +276,16 @@ For fine-grained control over strategy, sync batch norm, precision, and other di
 
 ## Custom Augmentations
 
-RF-DETR supports advanced data augmentations using the [Albumentations](https://albumentations.ai/) library, providing access to over 70 different image transformations optimized for object detection.
+RF-DETR uses torchvision-native default augmentations during training. Passing a non-empty `aug_config` switches to one of two optional backends, selected by `augmentation_backend`:
+
+- **CPU (default when `aug_config` is set):** [Albumentations](https://albumentations.ai/) integration, with access to over 70 image transformations optimized for object detection.
+- **GPU (`augmentation_backend="kornia"` or `"auto"` with CUDA):** [Kornia](https://kornia.readthedocs.io/) integration, applying augmentations on-batch on the GPU instead of per-sample on CPU workers.
+
+Both optional backends share the same `aug_config` dictionary format. See [Augmentation Backend Values](augmentations.md#augmentation-backend-values) for the full set of accepted `augmentation_backend` strings, including `"torchvision"` to force the default pipeline regardless of what's installed. Install the optional augmentation extra before using custom `aug_config` dictionaries or the built-in presets:
+
+```bash
+pip install "rfdetr[train,augment]"
+```
 
 → **[Complete Augmentation Guide](augmentations.md)** - Configuration examples, best practices, troubleshooting, and advanced topics.
 
@@ -267,10 +313,10 @@ model.train(
 )
 ```
 
-Use a built-in preset by importing it from `rfdetr.datasets.aug_config`:
+Use a built-in preset by importing it from `rfdetr.datasets.aug_configs`:
 
 ```python
-from rfdetr.datasets.aug_config import AUG_CONSERVATIVE, AUG_AGGRESSIVE, AUG_AERIAL, AUG_INDUSTRIAL
+from rfdetr.datasets.aug_configs import AUG_CONSERVATIVE, AUG_AGGRESSIVE, AUG_AERIAL, AUG_INDUSTRIAL
 
 model.train(dataset_dir="path/to/dataset", aug_config=AUG_AGGRESSIVE)
 ```
@@ -281,18 +327,34 @@ To disable all augmentations, pass an empty dict:
 model.train(dataset_dir="path/to/dataset", aug_config={})
 ```
 
+`aug_config` controls only the augmentation stack (Albumentations on CPU, or the equivalent Kornia pipeline when `augmentation_backend="kornia"`/`"auto"`). The training resize pipeline's independent resize → crop → resize branch (Option B) is controlled separately by `scale_jitter`:
+
+```python
+# Keep aug_config's default augmentation stack, but disable random crop/scale jitter
+model.train(dataset_dir="path/to/dataset", scale_jitter=False)
+```
+
+`scale_jitter` defaults to `True`. Set it to `False` to use direct resize only — no random crop, so annotations near image borders are never clipped.
+
 ---
 
 ## Memory Optimization
 
 ### Gradient Checkpointing
 
-For large models or high resolutions, enable gradient checkpointing to trade compute for memory:
+For large models or high resolutions, enable gradient checkpointing to trade compute for memory.
+
+!!! warning "Constructor parameter — not a `train()` parameter"
+
+    `gradient_checkpointing` is a `ModelConfig` field and must be passed to the **model constructor**, not to `train()`. Passing it to `train()` will raise a `ValidationError` because `TrainConfig` has `extra="forbid"`.
 
 ```python
+from rfdetr import RFDETRMedium
+
+model = RFDETRMedium(gradient_checkpointing=True)
+
 model.train(
     dataset_dir="path/to/dataset",
-    gradient_checkpointing=True,
     batch_size=2,  # May be able to increase with checkpointing
 )
 ```
@@ -303,11 +365,11 @@ This re-computes activations during the backward pass instead of storing them, r
 
 | Memory Level      | Configuration                                                                          |
 | ----------------- | -------------------------------------------------------------------------------------- |
-| Very Low (8GB)    | `batch_size=1`, `grad_accum_steps=16`, `gradient_checkpointing=True`, `resolution=560` |
+| Very Low (8GB)    | `batch_size=1`, `grad_accum_steps=16`, `gradient_checkpointing=True`, `resolution=576` |
 | Low (12GB)        | `batch_size=2`, `grad_accum_steps=8`, `gradient_checkpointing=True`                    |
 | Medium (16GB)     | `batch_size=4`, `grad_accum_steps=4`                                                   |
 | High (24GB)       | `batch_size=8`, `grad_accum_steps=2`                                                   |
-| Very High (40GB+) | `batch_size=16`, `grad_accum_steps=1`, `resolution=784`                                |
+| Very High (40GB+) | `batch_size=16`, `grad_accum_steps=1`, `resolution=768`                                |
 
 ---
 
@@ -336,10 +398,9 @@ RF-DETR applies built-in augmentations during training:
 
 - Random resizing
 - Random cropping
-- Color jittering
 - Horizontal flipping
 
-These are automatically configured and don't require manual setup.
+These defaults are implemented with torchvision and don't require manual setup. Color jitter and other advanced transforms are available through the optional Albumentations presets and custom `aug_config` dictionaries.
 
 ---
 
@@ -350,7 +411,7 @@ These are automatically configured and don't require manual setup.
 If you encounter CUDA out of memory errors:
 
 1. Reduce `batch_size`
-2. Enable `gradient_checkpointing=True`
+2. Enable `gradient_checkpointing=True` (pass to the model constructor, not `train()`)
 3. Reduce `resolution`
 4. Increase `grad_accum_steps` to maintain effective batch size
 

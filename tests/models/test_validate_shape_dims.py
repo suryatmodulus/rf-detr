@@ -3,11 +3,10 @@
 # Copyright (c) 2025 Roboflow. All Rights Reserved.
 # Licensed under the Apache License, Version 2.0 [see LICENSE for details]
 # ------------------------------------------------------------------------
-
 """Unit tests for :func:`rfdetr.detr._validate_shape_dims` and :func:`rfdetr.detr._resolve_patch_size`.
 
-Tests call each helper directly so each validation path has a single focused
-test without the export/predict scaffolding overhead.
+Tests call each helper directly so each validation path has a single focused test without the export/predict scaffolding
+overhead.
 """
 
 from types import SimpleNamespace
@@ -115,7 +114,12 @@ class TestResolvePatchSize:
     """_resolve_patch_size resolves and validates patch_size for export()/predict()."""
 
     def _cfg(self, patch_size: int) -> SimpleNamespace:
-        """Return a minimal model_config stub with the given patch_size."""
+        """Return a minimal model_config stub with the given patch_size.
+
+        Examples:
+            >>> TestResolvePatchSize()._cfg(16).patch_size
+            16
+        """
         return SimpleNamespace(patch_size=patch_size)
 
     def test_none_reads_from_model_config(self) -> None:

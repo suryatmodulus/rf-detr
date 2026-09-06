@@ -36,8 +36,8 @@ from rfdetr.training import RFDETRDataModule, RFDETRModelModule, build_trainer
 def _make_ptl_module_from(rfdetr_obj: RFDETR, dataset_dir: Path, output_dir: Path) -> RFDETRModelModule:
     """Build an :class:`~rfdetr.training.RFDETRModelModule` from an RFDETR instance.
 
-    Creates the module with the same architecture as *rfdetr_obj*, copies its
-    current weights, and asserts PTL lineage before returning.
+    Creates the module with the same architecture as *rfdetr_obj*, copies its current weights, and asserts PTL lineage
+    before returning.
 
     Args:
         rfdetr_obj: A (possibly trained) :class:`~rfdetr.detr.RFDETR` instance.
@@ -46,6 +46,10 @@ def _make_ptl_module_from(rfdetr_obj: RFDETR, dataset_dir: Path, output_dir: Pat
 
     Returns:
         Weight-synced :class:`~rfdetr.training.RFDETRModelModule` in eval mode.
+
+    Example:
+        >>> _make_ptl_module_from.__name__
+        '_make_ptl_module_from'
     """
     train_config = TrainConfig(
         dataset_file="roboflow",
@@ -73,10 +77,9 @@ def test_train_fast_dev_run(
 ) -> None:
     """Smoke-test the full PTL stack on a real synthetic dataset with fast_dev_run.
 
-    Uses ``build_trainer(tc, mc, fast_dev_run=2)`` and
-    ``trainer.fit(module, datamodule=datamodule)`` with a real model and real
-    data (no mocking).  Only asserts the pipeline runs without error;
-    convergence is tested by the GPU-only tests below.
+    Uses ``build_trainer(tc, mc, fast_dev_run=2)`` and ``trainer.fit(module, datamodule=datamodule)`` with a real model
+    and real data (no mocking).  Only asserts the pipeline runs without error; convergence is tested by the GPU-only
+    tests below.
     """
     output_dir = tmp_path / "output"
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -120,8 +123,8 @@ def test_train_convergence_native_ptl(
 ) -> None:
     """Native PTL stack converges: ``RFDETRModelModule`` + ``RFDETRDataModule`` + ``Trainer.fit``.
 
-    Uses ``Trainer.validate`` before and after ``Trainer.fit`` so only Lightning
-    elements are exercised — no ``engine.evaluate`` or legacy paths.
+    Uses ``Trainer.validate`` before and after ``Trainer.fit`` so only Lightning elements are exercised — no
+    ``engine.evaluate`` or legacy paths.
 
     Assertions:
         - ``val/mAP_50`` before training ≤ 5 %.
@@ -180,9 +183,8 @@ def test_train_convergence_rfdetr_api(
 ) -> None:
     """``RFDETR.train()`` entry-point converges on synthetic data.
 
-    Exercises the public ``model.train()`` API end-to-end.  Pre- and
-    post-training mAP are measured via ``Trainer.validate`` so the assertion
-    is identical to :func:`test_train_convergence_native_ptl`.
+    Exercises the public ``model.train()`` API end-to-end.  Pre- and post-training mAP are measured via
+    ``Trainer.validate`` so the assertion is identical to :func:`test_train_convergence_native_ptl`.
 
     Assertions:
         - ``val/mAP_50`` before training ≤ 5 %.
@@ -264,21 +266,18 @@ def test_train_convergence_segmentation(
 ) -> None:
     """Segmentation PTL stack converges on synthetic polygon data.
 
-    Mirrors :func:`test_train_convergence_native_ptl` but uses
-    :class:`~rfdetr.config.RFDETRSegNanoConfig` and
-    :class:`~rfdetr.config.SegmentationTrainConfig` with a dataset that
-    includes COCO polygon annotations.
+    Mirrors :func:`test_train_convergence_native_ptl` but uses :class:`~rfdetr.config.RFDETRSegNanoConfig` and
+    :class:`~rfdetr.config.SegmentationTrainConfig` with a dataset that includes COCO polygon annotations.
 
-    The mask mAP threshold is deliberately lower than the bbox threshold
-    because segmentation convergence is harder within the same epoch budget.
-    Thresholds are calibrated conservatively: the goal is to verify that the
-    segmentation training pipeline is functional (loss flows, masks are loaded,
-    both bbox and segm mAP improve) rather than to validate final accuracy.
+    The mask mAP threshold is deliberately lower than the bbox threshold because segmentation convergence is harder
+    within the same epoch budget. Thresholds are calibrated conservatively: the goal is to verify that the segmentation
+    training pipeline is functional (loss flows, masks are loaded, both bbox and segm mAP improve) rather than to
+    validate final accuracy.
 
     Assertions:
         - ``val/mAP_50`` before training ≤ 5 %.
-        - ``val/mAP_50`` after 5 epochs ≥ 10 %.
-        - ``val/segm_mAP_50`` after 5 epochs ≥ 5 %.
+        - ``val/mAP_50`` after 6 epochs ≥ 15 %.
+        - ``val/segm_mAP_50`` after 6 epochs ≥ 5 %.
     """
     output_dir = tmp_path / "train_output_seg"
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -294,7 +293,7 @@ def test_train_convergence_segmentation(
         dataset_file="roboflow",
         dataset_dir=str(dataset_dir),
         output_dir=str(output_dir),
-        epochs=5,
+        epochs=6,
         batch_size=4,
         grad_accum_steps=1,
         num_workers=max(1, (os.cpu_count() or 1) // 2),

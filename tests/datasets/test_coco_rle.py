@@ -3,12 +3,10 @@
 # Copyright (c) 2025 Roboflow. All Rights Reserved.
 # Licensed under the Apache License, Version 2.0 [see LICENSE for details]
 # ------------------------------------------------------------------------
-
 """Tests for native RLE annotation support in the COCO dataset pipeline.
 
-Verifies that :func:`convert_coco_poly_to_mask` and :class:`ConvertCoco`
-correctly handle compressed RLE, uncompressed RLE, and polygon segmentation
-formats — including mixed annotations within the same image.
+Verifies that :func:`convert_coco_poly_to_mask` and :class:`ConvertCoco` correctly handle compressed RLE, uncompressed
+RLE, and polygon segmentation formats — including mixed annotations within the same image.
 """
 
 import numpy as np
@@ -25,14 +23,26 @@ _IMAGE = Image.new("RGB", (_W, _H))
 
 
 def _make_reference_mask() -> np.ndarray:
-    """Create a deterministic 100x100 binary mask with a rectangular region."""
+    """Create a deterministic 100x100 binary mask with a rectangular region.
+
+    Example:
+        >>> mask = _make_reference_mask()
+        >>> mask.shape, int(mask.sum())
+        ((100, 100), 1200)
+    """
     mask = np.zeros((_H, _W), dtype=np.uint8)
     mask[20:50, 30:70] = 1
     return mask
 
 
 def _encode_compressed_rle(mask: np.ndarray) -> dict:
-    """Encode a binary mask to compressed RLE with string counts (COCO JSON format)."""
+    """Encode a binary mask to compressed RLE with string counts (COCO JSON format).
+
+    Example:
+        >>> encoded = _encode_compressed_rle(_make_reference_mask())
+        >>> isinstance(encoded["counts"], str), encoded["size"]
+        (True, [100, 100])
+    """
     rle = mask_util.encode(np.asfortranarray(mask))
     # COCO JSON stores counts as a UTF-8 string, not bytes
     rle["counts"] = rle["counts"].decode("utf-8") if isinstance(rle["counts"], bytes) else rle["counts"]
@@ -41,7 +51,13 @@ def _encode_compressed_rle(mask: np.ndarray) -> dict:
 
 
 def _encode_uncompressed_rle(mask: np.ndarray) -> dict:
-    """Encode a binary mask to uncompressed RLE with integer counts."""
+    """Encode a binary mask to uncompressed RLE with integer counts.
+
+    Example:
+        >>> encoded = _encode_uncompressed_rle(_make_reference_mask())
+        >>> isinstance(encoded["counts"], list), encoded["size"]
+        (True, [100, 100])
+    """
     flat = mask.flatten(order="F")
     counts = []
     current_val = 0
@@ -58,7 +74,13 @@ def _encode_uncompressed_rle(mask: np.ndarray) -> dict:
 
 
 def _make_polygon(mask: np.ndarray) -> list:
-    """Create a polygon annotation from a rectangular mask region."""
+    """Create a polygon annotation from a rectangular mask region.
+
+    Example:
+        >>> polygon = _make_polygon(_make_reference_mask())
+        >>> polygon[0][:4]
+        [30, 20, 70, 20]
+    """
     # Simple rectangle polygon matching the mask region [20:50, 30:70]
     return [[30, 20, 70, 20, 70, 50, 30, 50]]
 
@@ -196,6 +218,13 @@ class TestConvertCocoClassWithRle:
     """Tests that ``ConvertCoco`` correctly passes RLE annotations through."""
 
     def _make_annotation(self, segmentation: object, category_id: int = 0) -> dict:
+        """Build a minimal COCO annotation entry for converter tests.
+
+        Example:
+            >>> annotation = TestConvertCocoClassWithRle()._make_annotation([])
+            >>> annotation["category_id"], annotation["segmentation"]
+            (0, [])
+        """
         return {
             "bbox": [30, 20, 40, 30],
             "category_id": category_id,
@@ -205,6 +234,13 @@ class TestConvertCocoClassWithRle:
         }
 
     def _make_target(self, annotations: list) -> dict:
+        """Build a minimal target payload for ``ConvertCoco`` tests.
+
+        Example:
+            >>> target = TestConvertCocoClassWithRle()._make_target([])
+            >>> target["image_id"], target["annotations"]
+            (1, [])
+        """
         return {"image_id": 1, "annotations": annotations}
 
     def test_rle_masks_included_in_target(self) -> None:
@@ -259,12 +295,10 @@ class TestConvertCocoClassWithRle:
 class TestMalformedRle:
     """Documents _is_rle behaviour for structurally malformed inputs.
 
-    Before this PR a bare ``except:`` in the polygon path silently swallowed
-    any pycocotools error.  These tests confirm that ``_is_rle`` is a
-    *structural* check only (it does not validate values inside the dict) and
-    that dicts missing required keys are correctly classified as non-RLE so
-    they are routed through the polygon path — where pycocotools will either
-    handle them or raise a descriptive error rather than silently falling back.
+    Before this PR a bare ``except:`` in the polygon path silently swallowed any pycocotools error.  These tests confirm
+    that ``_is_rle`` is a *structural* check only (it does not validate values inside the dict) and that dicts missing
+    required keys are correctly classified as non-RLE so they are routed through the polygon path — where pycocotools
+    will either handle them or raise a descriptive error rather than silently falling back.
     """
 
     def test_missing_size_key_is_not_rle(self) -> None:
